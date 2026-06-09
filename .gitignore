@@ -1,0 +1,32 @@
+# Log e output generati a runtime.
+# Di norma log e snapshot vengono scritti su J:\backup-sviluppo, non nel repo;
+# queste regole sono una rete di sicurezza nel caso venissero creati in locale.
+*.log
+_logs/
+storico-snapshot.txt
+
+# Cartelle datate degli snapshot (formato AAAA-MM-GG), se create per errore nel repo.
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+
+# File temporanei e di backup degli editor.
+*.tmp
+*.bak
+*.swp
+*~
+
+# Artefatti di sistema Windows.
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Artefatti macOS (se i file vengono modificati su Mac).
+.DS_Store
+
+# Cartelle di configurazione di editor e IDE.
+.vscode/
+.idea/
+
+# Eventuale configurazione locale non destinata al versionamento.
+*.local.ps1
+config.local.ps1

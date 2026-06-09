@@ -1,0 +1,420 @@
+# sync-dev: backup locale con conferma, verifica del dispositivo e snapshot datati
+
+Soluzione di backup locale per Windows 11 basata su strumenti nativi (robocopy,
+Utilita' di pianificazione, PowerShell). Nessun software di terze parti, nessun
+servizio cloud. Agli orari previsti compare un pop-up di conferma: se accettato,
+e se il disco di backup e la sorgente superano le verifiche, viene creato uno
+snapshot datato della sorgente sul disco di backup. Gli snapshot piu' vecchi di
+una finestra configurabile vengono eliminati automaticamente.
+
+Caratteristiche principali:
+
+- Verifica dell'identita' del disco di backup: la copia parte solo se la lettera
+  attesa punta esattamente al dispositivo atteso (per modello e, opzionalmente,
+  numero di serie). Tutto e' parametrizzabile in un unico file.
+- Verifica della sorgente: se la sorgente non e' rilevata, la copia si blocca e
+  viene mostrato un alert; la sorgente puo' essere riconfigurata in un punto solo.
+- Snapshot datati con retention a finestra di giorni solari.
+- Doppio log: storico cumulativo permanente piu' log dettagliati con retention.
+
+## Indice
+1. Panoramica
+2. Contenuto del repository
+3. Configurazione
+4. Verifica dell'identita' del disco di backup
+5. Lettera di unita' fissa
+6. Installazione
+7. Comportamento a runtime
+8. Struttura su disco
+9. Retention
+10. Logging
+11. Verifica
+12. Ripristino
+13. Manutenzione
+14. Limiti
+15. Modalita' automatica (alternativa)
+16. Codici di uscita
+17. Controllo di versione e dati sensibili
+
+## 1. Panoramica
+
+Componenti:
+
+- robocopy: motore di copia incluso in Windows.
+- Utilita' di pianificazione: avvia il processo agli orari configurati.
+- PowerShell: configurazione, verifiche, pop-up di conferma, copia e
+  registrazione del task.
+
+Flusso: agli orari previsti, un task pianificato in sessione utente esegue lo
+script di conferma, che mostra un pop-up. Alla conferma, l'engine verifica che
+il disco di backup sia il dispositivo atteso e che la sorgente sia presente;
+solo allora avvia robocopy verso una cartella datata, aggiorna i log e applica
+la retention. Se una verifica fallisce, non viene copiato nulla e viene mostrato
+un alert specifico.
+
+Valori predefiniti (modificabili, vedi sezione 3):
+
+- Sorgente: `E:\`
+- Disco di backup: lettera `J`, modello `*Samsung*T7*`
+- Radice degli snapshot: `J:\backup-sviluppo`
+- Cartella degli script: `C:\Scripts\sync-dev`
+
+## 2. Contenuto del repository
+
+| File | Ruolo |
+|------|-------|
+| `Config-sync-dev.ps1` | Parametri e funzioni condivise (caricato dagli altri script) |
+| `Backup-Sviluppo.ps1` | Verifica disco e sorgente, crea lo snapshot, scrive i log, applica la retention |
+| `Backup-Conferma.ps1` | Mostra il pop-up; richiama l'engine e mostra esito o alert |
+| `Registra-Task-Conferma.ps1` | Registra il task pianificato (una tantum) |
+| `Mostra-Dischi.ps1` | Elenca i dischi collegati con lettera, modello, serial e bus |
+| `Imposta-LetteraJ.ps1` | Assegna la lettera attesa al disco atteso |
+| `README.md` | Questo documento |
+
+File della modalita' automatica alternativa (non attivi, vedi sezione 15):
+
+| File | Ruolo |
+|------|-------|
+| `Registra-Task.ps1` | Registra i task automatici (orari + watcher) |
+| `Watcher-Backup.ps1` | Avvia la copia al collegamento del disco di backup |
+
+Tutti gli script devono risiedere nella stessa cartella (`C:\Scripts\sync-dev`),
+perche' si caricano a vicenda tramite percorso relativo allo script.
+
+## 3. Configurazione
+
+Tutti i parametri sono in cima a `Config-sync-dev.ps1`, file unico caricato in
+dot-source dagli altri script.
+
+| Variabile | Default | Significato |
+|-----------|---------|-------------|
+| `$Source` | `E:\` | Volume o cartella sorgente |
+| `$SourceLabel` | `sorgente progetti` | Descrizione usata nei messaggi |
+| `$ExpectedDriveLetter` | `J` | Lettera che il disco di backup deve avere |
+| `$ExpectedDiskModel` | `*Samsung*T7*` | Confronto -like sul nome del disco |
+| `$ExpectedDiskSerial` | (vuoto) | Numero di serie esatto; vuoto = non controllato |
+| `$BackupRoot` | `J:\backup-sviluppo` | Radice degli snapshot (derivata dalla lettera) |
+| `$RetainDays` | `5` | Ampiezza della retention in giorni solari |
+| `$ExcludeDirs` | vedi file | Cartelle escluse dalla copia (per nome, a ogni profondita') |
+| `$ExcludeFiles` | vedi file | Pattern di file esclusi |
+
+Per cambiare modello di SSD in futuro, basta aggiornare `$ExpectedDiskModel` ed
+eventualmente `$ExpectedDiskSerial`. Per cambiare sorgente, basta aggiornare
+`$Source`. Nessun altro file va modificato.
+
+Cartelle escluse di default (rigenerabili nei progetti full-stack):
+`node_modules`, `.pnpm-store`, `.pnpm`, `dist`, `build`, `out`, `.next`,
+`.nuxt`, `.svelte-kit`, `target`, `__pycache__`, `.venv`, `venv`, `.tox`,
+`.pytest_cache`, `.cache`, `.parcel-cache`, `.turbo`, `.gradle`, `coverage`.
+La cartella `.git` e' inclusa per default; per escluderla, rimuovere il commento
+alla riga relativa.
+
+## 4. Verifica dell'identita' del disco di backup
+
+Prima di ogni copia, l'engine controlla che la lettera attesa esista e punti
+esattamente al dispositivo atteso. Il controllo avviene in tre passaggi:
+
+1. Esiste un disco con la lettera `$ExpectedDriveLetter`? In caso negativo, il
+   backup si blocca (disco non collegato come lettera attesa).
+2. Il nome del disco (FriendlyName) corrisponde a `$ExpectedDiskModel`? In caso
+   negativo, il backup si blocca (dispositivo diverso da quello atteso).
+3. Se `$ExpectedDiskSerial` e' valorizzato, il numero di serie corrisponde? In
+   caso negativo, il backup si blocca.
+
+Il modello da solo identifica una categoria di dischi (qualsiasi Samsung T7); il
+numero di serie identifica il singolo esemplare. Per la massima precisione,
+impostare anche `$ExpectedDiskSerial`. Per scoprire modello e serial esatti del
+proprio dispositivo, eseguire:
+
+```powershell
+C:\Scripts\sync-dev\Mostra-Dischi.ps1
+```
+
+Copiare il valore della colonna Modello in `$ExpectedDiskModel` (con eventuali
+asterischi come caratteri jolly) e, se desiderato, il valore della colonna
+Serial in `$ExpectedDiskSerial`.
+
+## 5. Lettera di unita' fissa
+
+Il requisito e' che il disco di backup prenda sempre la lettera attesa quando
+collegato. Windows ricorda l'assegnazione di lettera per ciascun volume, quindi
+basta impostarla una volta. Due modalita':
+
+Automatica (parametrica), con il disco collegato e PowerShell come Amministratore:
+
+```powershell
+C:\Scripts\sync-dev\Imposta-LetteraJ.ps1
+```
+
+Lo script individua il disco atteso, assegna la lettera attesa alla sua
+partizione dati e segnala se la lettera e' gia' occupata da un altro disco.
+
+Manuale: Gestione disco di Windows, tasto destro sulla partizione del disco,
+Cambia lettera e percorso di unita', impostare la lettera attesa.
+
+Se il disco e' presente ma con una lettera diversa (per esempio perche' la
+lettera attesa era occupata), la verifica della sezione 4 fallisce e il backup
+viene bloccato, come richiesto.
+
+## 6. Installazione
+
+Sequenza cronologica completa, da eseguire in ordine. Lo sblocco dei file (passo
+3) e' parte integrante della sequenza, non un dettaglio: senza di esso gli script
+vengono bloccati dai criteri di esecuzione.
+
+1. Copiare tutti gli script nella cartella `C:\Scripts\sync-dev`.
+2. Aprire PowerShell come Amministratore (con il proprio account).
+3. Sbloccare i file e abilitare l'esecuzione degli script locali (lo scope
+   CurrentUser non richiede privilegi di amministratore):
+
+   ```powershell
+   Get-ChildItem C:\Scripts\sync-dev\*.ps1 | Unblock-File
+   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+   ```
+
+   REGOLA DA RICORDARE: ripetere il comando Unblock-File ogni volta che si
+   aggiunge o si sostituisce uno script (un file appena scaricato e' di nuovo
+   contrassegnato come proveniente da Internet e quindi bloccato). Se la
+   configurazione non si carica, gli script lo segnalano e invitano a eseguire
+   Unblock-File.
+4. Collegare il disco di backup.
+5. Scoprire i parametri del disco ed eventualmente aggiornarli in
+   `Config-sync-dev.ps1`:
+
+   ```powershell
+   C:\Scripts\sync-dev\Mostra-Dischi.ps1
+   ```
+
+6. Assegnare la lettera attesa al disco (se non gia' impostata):
+
+   ```powershell
+   C:\Scripts\sync-dev\Imposta-LetteraJ.ps1
+   ```
+
+7. Registrare il task pianificato:
+
+   ```powershell
+   C:\Scripts\sync-dev\Registra-Task-Conferma.ps1
+   ```
+
+8. Verificare che il task sia stato creato:
+
+   ```powershell
+   Get-ScheduledTask -TaskName 'Backup Sviluppo (con conferma)'
+   ```
+
+Note sul passo 7: `Registra-Task-Conferma.ps1` non mostra alcun pop-up, va
+eseguito una sola volta e serve solo a creare il task. Se viene lanciato mentre
+gli script sono ancora bloccati (passo 3 non eseguito), viene interrotto e il
+task non viene creato.
+
+Il task pianificato gira con -ExecutionPolicy Bypass, quindi non e' influenzato
+dai criteri di esecuzione. Per una prova singola manuale senza modificare i
+criteri si puo' usare `powershell -ExecutionPolicy Bypass -File <percorso>`.
+
+Nella GUI il task si trova nella radice della Libreria Utilita' di pianificazione
+(premere F5 per aggiornare la vista). Per provare subito il pop-up senza attendere
+gli orari, avviare il task manualmente (tasto destro, Esegui) oppure lanciare
+`Backup-Conferma.ps1`.
+
+Se in precedenza era stata registrata la modalita' automatica, rimuoverla per
+evitare doppie esecuzioni:
+
+```powershell
+Unregister-ScheduledTask -TaskName 'Backup Sviluppo E to J' -Confirm:$false
+Unregister-ScheduledTask -TaskName 'Backup Sviluppo - Watcher J' -Confirm:$false
+```
+
+## 7. Comportamento a runtime
+
+Ruoli dei file: `Registra-Task-Conferma.ps1` crea il task pianificato (una sola
+volta); il task e' il timer che compare nell'Utilita' di pianificazione;
+`Backup-Conferma.ps1` e' lo script che il task lancia agli orari e che mostra il
+pop-up; `Backup-Sviluppo.ps1` e' l'engine che esegue verifiche e copia.
+
+Agli orari configurati, se l'utente e' connesso alla sessione, compare un
+pop-up di conferma in primo piano, con timeout configurabile.
+
+- Conferma (Si): l'engine esegue le verifiche e, se superate, crea lo snapshot,
+  applica la retention e mostra l'esito.
+- Rifiuto (No) o timeout: non viene eseguita alcuna copia.
+- Disco di backup assente o diverso da quello atteso: alert dedicato, nessuna
+  copia.
+- Sorgente non rilevata: alert dedicato che invita a riconfigurare la sorgente,
+  nessuna copia.
+
+Il task gira come utente loggato (non come SYSTEM), condizione necessaria per
+mostrare una finestra nella sessione interattiva. Un mutex globale impedisce
+esecuzioni sovrapposte. Gli esiti delle verifiche sono comunicati al pop-up
+tramite i codici di uscita della sezione 16.
+
+## 8. Struttura su disco
+
+```
+J:\backup-sviluppo\
+  2026-06-09\
+    12-31-04\
+    17-50-12\
+  2026-06-08\
+    08-15-40\
+  _logs\
+    storico-snapshot.txt
+    backup_AAAAMMGG_HHMMSS.log
+```
+
+Ogni esecuzione confermata e validata crea una cartella `AAAA-MM-GG\HH-mm-ss`
+contenente una copia completa e indipendente della sorgente (escluse le cartelle
+in `$ExcludeDirs`). In una giornata possono esistere da zero a due sottocartelle.
+
+Nota: alcune radici di volume hanno gli attributi Nascosto e Sistema e robocopy
+puo' propagarli alla cartella di destinazione, che in Esplora risorse apparirebbe
+vuota pur contenendo i dati (sono visibili da PowerShell con Get-ChildItem
+-Force). Per questo l'engine riporta automaticamente la cartella del giorno e
+quella dello snapshot a directory normale dopo ogni copia.
+
+## 9. Retention
+
+Dopo ogni copia, l'engine legge la data di ogni cartella con nome `AAAA-MM-GG`
+sotto `$BackupRoot` ed elimina quelle la cui data e' anteriore a oggi meno
+`$RetainDays` giorni. Si tratta di una finestra a calendario: i giorni senza
+backup non spostano la soglia, quindi eventuali buchi sono gestiti correttamente.
+
+Esempio con `$RetainDays = 5` e data odierna 2026-06-09: vengono eliminate le
+cartelle datate 2026-06-03 e precedenti; restano quelle dal 2026-06-04 in poi.
+
+La retention opera esclusivamente all'interno di `$BackupRoot`. La sorgente non
+viene mai modificata ne' cancellata. La rimozione delle cartelle usa un metodo
+robusto anche per alberi profondi.
+
+## 10. Logging
+
+Due log distinti in `_logs`:
+
+- `storico-snapshot.txt`: log cumulativo in append, una riga per snapshot, senza
+  retention. Registra data e ora, percorso relativo dello snapshot, esito e
+  numero di file con dimensione totale. Registra anche i tentativi bloccati per
+  sorgente assente. Esempio:
+
+  ```
+  2026-06-09 12:31:04 | 2026-06-09\12-31-04 | OK | 12483 file | 3250,4 MB
+  2026-06-09 17:50:12 | 2026-06-09\17-50-12 | OK | 12490 file | 3251,1 MB
+  ```
+
+- `backup_AAAAMMGG_HHMMSS.log`: log dettagliato di robocopy per ogni esecuzione,
+  utile per il troubleshooting. Segue la retention di `$RetainDays` giorni. Il
+  conteggio di file e dimensione nello storico e' calcolato in modo indipendente
+  dalla lingua del sistema operativo.
+
+## 11. Verifica
+
+1. Con il disco di backup corretto collegato e con la lettera attesa, eseguire:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File C:\Scripts\sync-dev\Backup-Conferma.ps1
+   ```
+
+   Confermare e verificare la creazione di `J:\backup-sviluppo\<data>\<ora>`, di
+   una riga in `storico-snapshot.txt` e di un file `backup_*.log`.
+2. Collegare un disco diverso con la stessa lettera (o nessun disco): premendo
+   Si deve comparire l'alert di blocco, senza copia.
+3. Rendere non disponibile la sorgente (per esempio puntando `$Source` a un
+   percorso inesistente in fase di test): premendo Si deve comparire l'alert
+   sorgente, senza copia.
+4. Premere No o lasciare scadere il timeout: non deve accadere nulla.
+5. Per la retention, creare a mano alcune cartelle `AAAA-MM-GG` con date vecchie
+   ed eseguire una copia valida: quelle anteriori alla soglia vengono eliminate,
+   lo storico resta intatto.
+6. Nell'Utilita' di pianificazione, avviare manualmente il task: deve comparire
+   il pop-up.
+
+## 12. Ripristino
+
+Ogni snapshot e' una copia navigabile uno a uno. Per ripristinare, individuare
+la cartella `AAAA-MM-GG\HH-mm-ss` desiderata e copiare i file verso la sorgente,
+manualmente o con robocopy invertendo sorgente e destinazione, senza opzioni di
+purge o mirror.
+
+## 13. Manutenzione
+
+- Disattivare temporaneamente: nell'Utilita' di pianificazione, disabilitare il
+  task.
+- Cambiare modello di SSD, sorgente, orari o retention: aggiornare
+  `Config-sync-dev.ps1` (e gli orari in `Registra-Task-Conferma.ps1`); per gli
+  orari, rieseguire quest'ultimo (il parametro `-Force` sovrascrive il task).
+- Rimuovere completamente:
+
+  ```powershell
+  Unregister-ScheduledTask -TaskName 'Backup Sviluppo (con conferma)' -Confirm:$false
+  ```
+
+- Permessi: se alcuni file non vengono copiati, impostare `-RunLevel Highest` in
+  `Registra-Task-Conferma.ps1` e rieseguire lo script.
+
+## 14. Limiti
+
+- Gli snapshot sono copie multiple e indipendenti: piu' sicurezza nel ripristino
+  di versioni recenti, maggiore occupazione di spazio.
+- La soluzione e' una copia, non un sistema di versionamento dei file.
+- Per protezione contro ransomware o guasti, valutare una terza copia offline
+  periodica secondo la regola 3-2-1.
+- Il pop-up appare solo a utente connesso, coerentemente con un disco di backup
+  collegato solo in presenza dell'operatore.
+
+## 15. Modalita' automatica (alternativa)
+
+In alternativa alla conferma manuale esiste una modalita' automatica composta da
+`Registra-Task.ps1` (esecuzione come SYSTEM agli orari previsti) e
+`Watcher-Backup.ps1` (avvio della copia al collegamento del disco). Anche in
+questa modalita' l'engine applica le verifiche di disco e sorgente, ma gli esiti
+vengono solo registrati nei log, senza pop-up. Le due modalita' sono mutuamente
+esclusive: utilizzarne una sola per evitare doppie esecuzioni.
+
+## 16. Codici di uscita
+
+L'engine `Backup-Sviluppo.ps1` comunica l'esito al chiamante con questi codici:
+
+| Codice | Significato |
+|--------|-------------|
+| 0 | Operazione riuscita |
+| 101 | Disco con la lettera attesa presente ma diverso dal dispositivo atteso |
+| 102 | Sorgente non rilevata |
+| 103 | Nessun disco con la lettera attesa collegato |
+| 8 o superiore | Errori riportati da robocopy (vedi log dettagliato) |
+
+## 17. Controllo di versione e dati sensibili
+
+Il repository contiene solo gli script, il README e il file `.gitignore`. I dati
+di backup (i progetti) risiedono su un volume separato (`J:\backup-sviluppo`) e
+non fanno parte del repository; il file `.gitignore` esclude comunque log, file
+storici e cartelle datate, come rete di sicurezza.
+
+Cosa controllare prima del primo commit:
+
+- Nessuna credenziale o segreto. Gli script non contengono password, token o
+  chiavi API. Il task viene registrato per l'utente corrente tramite variabili di
+  ambiente risolte a runtime, quindi nessun nome utente o nome macchina viene
+  scritto nei file.
+- Unico identificatore presente: il numero di serie del disco in
+  `Config-sync-dev.ps1` (`$ExpectedDiskSerial`). Non e' una credenziale, e' un
+  identificatore hardware, inutile senza accesso fisico al dispositivo. Per un
+  repository privato puo' restare nel file tracciato senza problemi.
+- Se si preferisce non versionare il numero di serie (per esempio se il
+  repository potrebbe diventare pubblico), si puo' usare un override locale non
+  tracciato: impostare `$ExpectedDiskSerial = ''` nel `Config-sync-dev.ps1`
+  tracciato e creare un file `config.local.ps1` (gia' escluso dal `.gitignore`)
+  con la riga `$ExpectedDiskSerial = '<serial reale>'`. Il file di configurazione
+  carica automaticamente `config.local.ps1` se presente.
+
+Sequenza per inizializzare il repository:
+
+```powershell
+cd C:\Scripts\sync-dev
+git init
+git status            # verificare che vengano inclusi solo .ps1, README.md, .gitignore
+git add .
+git commit -m "sync-dev: backup locale con conferma, verifica disco e snapshot"
+```
+
+---
+Documento anonimizzato: non contiene nomi utente, nomi macchina o riferimenti
+personali o aziendali.
