@@ -19,7 +19,7 @@ $ExpectedDiskSerial  = ''               # serial reale in config.local.ps1 (non 
 $BackupRoot = ($ExpectedDriveLetter + ':\backup-sviluppo')
 
 # Giorni solari di retention
-$RetainDays = 5
+$RetainDays = 2
 
 # Cartelle e file esclusi dalla copia (adatta allo stack)
 $ExcludeDirs = @(
@@ -28,7 +28,11 @@ $ExcludeDirs = @(
     'target',
     '__pycache__','.venv','venv','.tox','.pytest_cache',
     '.cache','.parcel-cache','.turbo','.gradle',
-    'coverage'
+    'coverage',
+    # Corpus statico ~288k file (.md) / ~4 GB: troppo pesante per snapshot completi
+    # ripetuti (faceva sforare il limite di 3 ore del task). Percorso ASSOLUTO cosi'
+    # esclude SOLO questo, non altre cartelle chiamate 'data'. Va salvato a parte.
+    'E:\legal-consultant\data'
     # '.git'   # escludi SOLO se ogni repo e' gia' su un remoto
 )
 $ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store')
