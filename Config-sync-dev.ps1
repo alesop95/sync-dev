@@ -18,7 +18,8 @@ $ExpectedDiskSerial  = ''               # serial reale in config.local.ps1 (non 
 # Radice degli snapshot sul disco di backup
 $BackupRoot = ($ExpectedDriveLetter + ':\backup-sviluppo')
 
-# Giorni solari di retention
+# Giorni solari conservati sul disco di backup, oggi INCLUSO.
+# 2 = restano la cartella di oggi e quella di ieri. Minimo effettivo 1 (solo oggi).
 $RetainDays = 2
 
 # Cartelle e file esclusi dalla copia (adatta allo stack)
