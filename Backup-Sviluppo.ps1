@@ -95,21 +95,24 @@ try {
               $now.ToString('yyyy-MM-dd HH:mm:ss'), $rel, $stato, $count, $sizeMB
     Add-Content -LiteralPath $HistoryFile -Value $line -Encoding UTF8
 
-    # --- Retention: elimina i giorni piu' vecchi di $RetainDays giorni SOLARI (solo lato backup) ---
-    $cutoff = $now.Date.AddDays(-$RetainDays)
+    # --- Retention: conserva $RetainDays giorni SOLARI, oggi incluso (solo lato backup) ---
+    # Il giorno corrente non va mai eliminato: contiene lo snapshot appena creato.
+    if ($RetainDays -lt 1) { $RetainDays = 1 }
+    $cutoff = $now.Date.AddDays(-($RetainDays - 1))    # data del giorno piu' vecchio da tenere
     Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } |
         ForEach-Object {
             $d = [datetime]::ParseExact($_.Name, 'yyyy-MM-dd', $null)
             if ($d -lt $cutoff) {
-                Write-Host "Retention: elimino il giorno $($_.Name) (piu' vecchio di $RetainDays gg)"
+                Write-Host "Retention: elimino il giorno $($_.Name) (fuori dalla finestra di $RetainDays giorni)"
                 Remove-TreeFast $_.FullName
             }
         }
 
-    # Pulizia SOLO dei log dettagliati; lo storico (storico-snapshot.txt) NON viene toccato.
+    # Pulizia SOLO dei log dettagliati, sulla stessa soglia a calendario delle
+    # cartelle-giorno; lo storico (storico-snapshot.txt) NON viene toccato.
     Get-ChildItem -LiteralPath $LogDir -Filter 'backup_*.log' -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -lt $now.AddDays(-$RetainDays) } |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 finally {

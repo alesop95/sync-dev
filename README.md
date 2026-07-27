@@ -14,7 +14,7 @@ Caratteristiche principali:
   numero di serie). Tutto e' parametrizzabile in un unico file.
 - Verifica della sorgente: se la sorgente non e' rilevata, la copia si blocca e
   viene mostrato un alert; la sorgente puo' essere riconfigurata in un punto solo.
-- Snapshot datati con retention a finestra di giorni solari.
+- Snapshot datati con retention a finestra di giorni solari (oggi incluso).
 - Doppio log: storico cumulativo permanente piu' log dettagliati con retention.
 
 ## Indice
@@ -94,7 +94,7 @@ dot-source dagli altri script.
 | `$ExpectedDiskModel` | `*Samsung*T7*` | Confronto -like sul nome del disco |
 | `$ExpectedDiskSerial` | (vuoto) | Numero di serie esatto; vuoto = non controllato |
 | `$BackupRoot` | `J:\backup-sviluppo` | Radice degli snapshot (derivata dalla lettera) |
-| `$RetainDays` | `5` | Ampiezza della retention in giorni solari |
+| `$RetainDays` | `2` | Giorni solari conservati, oggi incluso (minimo effettivo 1) |
 | `$ExcludeDirs` | vedi file | Cartelle escluse dalla copia (per nome, a ogni profondita') |
 | `$ExcludeFiles` | vedi file | Pattern di file esclusi |
 
@@ -275,12 +275,14 @@ quella dello snapshot a directory normale dopo ogni copia.
 ## 9. Retention
 
 Dopo ogni copia, l'engine legge la data di ogni cartella con nome `AAAA-MM-GG`
-sotto `$BackupRoot` ed elimina quelle la cui data e' anteriore a oggi meno
-`$RetainDays` giorni. Si tratta di una finestra a calendario: i giorni senza
-backup non spostano la soglia, quindi eventuali buchi sono gestiti correttamente.
+sotto `$BackupRoot` e conserva gli ultimi `$RetainDays` giorni solari, **oggi
+incluso**; le cartelle piu' vecchie vengono eliminate. Si tratta di una finestra
+a calendario: i giorni senza backup non spostano la soglia, quindi eventuali
+buchi sono gestiti correttamente. Il giorno corrente non viene mai eliminato:
+se `$RetainDays` fosse impostato sotto 1, l'engine lo riporta a 1.
 
-Esempio con `$RetainDays = 5` e data odierna 2026-06-09: vengono eliminate le
-cartelle datate 2026-06-03 e precedenti; restano quelle dal 2026-06-04 in poi.
+Esempio con `$RetainDays = 2` e data odierna 2026-07-27: restano le cartelle
+2026-07-27 e 2026-07-26; vengono eliminate la 2026-07-25 e le precedenti.
 
 La retention opera esclusivamente all'interno di `$BackupRoot`. La sorgente non
 viene mai modificata ne' cancellata. La rimozione delle cartelle usa un metodo
@@ -301,7 +303,8 @@ Due log distinti in `_logs`:
   ```
 
 - `backup_AAAAMMGG_HHMMSS.log`: log dettagliato di robocopy per ogni esecuzione,
-  utile per il troubleshooting. Segue la retention di `$RetainDays` giorni. Il
+  utile per il troubleshooting. Segue la stessa soglia a calendario delle
+  cartelle-giorno, quindi restano i log degli ultimi `$RetainDays` giorni. Il
   conteggio di file e dimensione nello storico e' calcolato in modo indipendente
   dalla lingua del sistema operativo.
 
@@ -322,8 +325,9 @@ Due log distinti in `_logs`:
    sorgente, senza copia.
 4. Premere No o lasciare scadere il timeout: non deve accadere nulla.
 5. Per la retention, creare a mano alcune cartelle `AAAA-MM-GG` con date vecchie
-   ed eseguire una copia valida: quelle anteriori alla soglia vengono eliminate,
-   lo storico resta intatto.
+   ed eseguire una copia valida: con `$RetainDays = 2` restano solo la cartella
+   di oggi e quella di ieri, le piu' vecchie vengono eliminate insieme ai loro
+   `backup_*.log`, lo storico resta intatto.
 6. Nell'Utilita' di pianificazione, avviare manualmente il task: deve comparire
    il pop-up.
 
