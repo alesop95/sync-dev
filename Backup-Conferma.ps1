@@ -49,6 +49,11 @@ switch ($code) {
         $wshell.Popup("La $SourceLabel ($Source) non e' rilevata.`nBackup BLOCCATO. Puoi impostare un'altra sorgente in Config-sync-dev.ps1.", 0, "Backup Sviluppo - BLOCCATO", 48 + 4096)
     }
     default {
-        $wshell.Popup("Backup terminato con errori (codice $code).`nControlla i log in $BackupRoot\_logs.", 30, "Backup Sviluppo", 48 + 4096)
+        # Codice >= 8 = copia arrivata in fondo con file mancanti: l'engine ha
+        # marcato lo snapshot e ha conservato la copia completa precedente.
+        $extra = if ($code -ge 8) {
+            "`nLo snapshot e' stato marcato come INCOMPLETO: verra' eliminato al primo backup completo e fino ad allora l'ultima copia completa resta conservata."
+        } else { '' }
+        $wshell.Popup("Backup terminato con errori (codice $code).$extra`nControlla i log in $BackupRoot\_logs.", 30, "Backup Sviluppo", 48 + 4096)
     }
 }

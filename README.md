@@ -15,6 +15,9 @@ Caratteristiche principali:
 - Verifica della sorgente: se la sorgente non e' rilevata, la copia si blocca e
   viene mostrato un alert; la sorgente puo' essere riconfigurata in un punto solo.
 - Snapshot datati con retention a finestra di giorni solari (oggi incluso).
+- Memoria degli snapshot incompleti: se robocopy termina con file mancanti, lo
+  snapshot viene marcato, l'ultima copia completa non viene cancellata e la
+  cartella difettosa viene eliminata al primo backup completo successivo.
 - Doppio log: storico cumulativo permanente piu' log dettagliati con retention.
 
 ## Indice
@@ -64,7 +67,7 @@ Valori predefiniti (modificabili, vedi sezione 3):
 | File | Ruolo |
 |------|-------|
 | `Config-sync-dev.ps1` | Parametri e funzioni condivise (caricato dagli altri script) |
-| `Backup-Sviluppo.ps1` | Verifica disco e sorgente, crea lo snapshot, scrive i log, applica la retention |
+| `Backup-Sviluppo.ps1` | Verifica disco e sorgente, crea lo snapshot, scrive i log, marca le copie incomplete, applica la retention |
 | `Backup-Conferma.ps1` | Mostra il pop-up; richiama l'engine e mostra esito o alert |
 | `Registra-Task-Conferma.ps1` | Registra il task pianificato (una tantum) |
 | `Mostra-Dischi.ps1` | Elenca i dischi collegati con lettera, modello, serial e bus |
@@ -94,7 +97,7 @@ dot-source dagli altri script.
 | `$ExpectedDiskModel` | `*Samsung*T7*` | Confronto -like sul nome del disco |
 | `$ExpectedDiskSerial` | (vuoto) | Numero di serie esatto; vuoto = non controllato |
 | `$BackupRoot` | `J:\backup-sviluppo` | Radice degli snapshot (derivata dalla lettera) |
-| `$RetainDays` | `2` | Giorni solari conservati, oggi incluso (minimo effettivo 1) |
+| `$RetainDays` | `1` | Giorni solari conservati, oggi incluso: 1 = resta solo il giorno corrente (minimo effettivo 1) |
 | `$ExcludeDirs` | vedi file | Cartelle escluse dalla copia (per nome, a ogni profondita') |
 | `$ExcludeFiles` | vedi file | Pattern di file esclusi |
 
@@ -254,9 +257,8 @@ tramite i codici di uscita della sezione 16.
 J:\backup-sviluppo\
   2026-06-09\
     12-31-04\
+      _SNAPSHOT-INCOMPLETO.txt   (solo se la copia ha avuto file mancanti)
     17-50-12\
-  2026-06-08\
-    08-15-40\
   _logs\
     storico-snapshot.txt
     backup_AAAAMMGG_HHMMSS.log
@@ -265,6 +267,15 @@ J:\backup-sviluppo\
 Ogni esecuzione confermata e validata crea una cartella `AAAA-MM-GG\HH-mm-ss`
 contenente una copia completa e indipendente della sorgente (escluse le cartelle
 in `$ExcludeDirs`). In una giornata possono esistere da zero a due sottocartelle.
+Con `$RetainDays = 1` esiste una sola cartella-giorno alla volta, quella
+corrente: le precedenti vengono eliminate a fine copia (sezione 9).
+
+`_SNAPSHOT-INCOMPLETO.txt` e' il file sentinella che marca uno snapshot in cui
+robocopy non ha copiato tutti i file (codice di uscita >= 8). Vive dentro la
+cartella dello snapshot, quindi la marcatura sopravvive alla fine dello script:
+e' la memoria che le esecuzioni successive leggono per sapere cosa conservare e
+cosa buttare (sezione 9). Contiene data, codice robocopy e nome del log
+dettagliato.
 
 Nota: alcune radici di volume hanno gli attributi Nascosto e Sistema e robocopy
 puo' propagarli alla cartella di destinazione, che in Esplora risorse apparirebbe
@@ -281,12 +292,41 @@ a calendario: i giorni senza backup non spostano la soglia, quindi eventuali
 buchi sono gestiti correttamente. Il giorno corrente non viene mai eliminato:
 se `$RetainDays` fosse impostato sotto 1, l'engine lo riporta a 1.
 
-Esempio con `$RetainDays = 2` e data odierna 2026-07-27: restano le cartelle
-2026-07-27 e 2026-07-26; vengono eliminate la 2026-07-25 e le precedenti.
+Esempio con `$RetainDays = 1` e data odierna 2026-09-03: resta solo la cartella
+2026-09-03; vengono eliminate la 2026-09-02 e tutte le precedenti.
 
 La retention opera esclusivamente all'interno di `$BackupRoot`. La sorgente non
 viene mai modificata ne' cancellata. La rimozione delle cartelle usa un metodo
 robusto anche per alberi profondi.
+
+### Copie incomplete
+
+Con una finestra di un solo giorno, una copia difettosa potrebbe restare l'unica
+copia disponibile: robocopy puo' arrivare in fondo e restituire un codice >= 8
+perche' alcuni file non sono stati copiati (file bloccati da un processo, errori
+di I/O, spazio esaurito, permessi). Per questo l'engine tiene traccia dell'esito:
+
+1. **Marcatura.** Se il codice e' >= 8, nella cartella dello snapshot viene
+   scritto `_SNAPSHOT-INCOMPLETO.txt`. Lo snapshot non viene eliminato: una copia
+   parziale e' meglio di nessuna copia.
+2. **Finestra allargata.** Nella stessa esecuzione la finestra di retention si
+   estende fino a comprendere il giorno dell'ultimo snapshot **completo**, che
+   non viene quindi cancellato. Se non esiste alcuno snapshot completo, viene
+   protetto lo snapshot precedente, che puo' contenere i file mancati stavolta.
+3. **Pulizia al primo backup completo.** Appena una copia riesce, tutti gli
+   snapshot marcati vengono eliminati, compresi quelli nella cartella-giorno
+   corrente, dove la finestra a calendario non arriverebbe. La cancellazione
+   viene registrata nello storico con esito `PULIZIA` e le cartelle-giorno
+   rimaste vuote vengono rimosse.
+
+Il risultato e' che sul disco non restano mai piu' di due cartelle-giorno e che
+l'ultima copia completa non viene mai sostituita da una difettosa. Nel pop-up di
+esito, in caso di errori, viene ricordato che lo snapshot e' stato marcato.
+
+Esempio: il backup del 2026-09-02 termina con codice 8. Su disco restano il
+giorno 2026-09-02 (marcato) e il giorno dell'ultima copia completa. Il backup del
+2026-09-03 riesce: la cartella 2026-09-02 viene eliminata insieme a quella della
+vecchia copia completa e resta solo 2026-09-03.
 
 ## 10. Logging
 
@@ -295,16 +335,20 @@ Due log distinti in `_logs`:
 - `storico-snapshot.txt`: log cumulativo in append, una riga per snapshot, senza
   retention. Registra data e ora, percorso relativo dello snapshot, esito e
   numero di file con dimensione totale. Registra anche i tentativi bloccati per
-  sorgente assente. Esempio:
+  sorgente assente e, con esito `PULIZIA`, gli snapshot incompleti eliminati
+  (sezione 9). Esempio:
 
   ```
   2026-06-09 12:31:04 | 2026-06-09\12-31-04 | OK | 12483 file | 3250,4 MB
-  2026-06-09 17:50:12 | 2026-06-09\17-50-12 | OK | 12490 file | 3251,1 MB
+  2026-06-09 17:50:12 | 2026-06-09\17-50-12 | ERRORI (codice 8) -> vedi backup_20260609_175012.log | 12102 file | 3120,7 MB
+  2026-06-10 17:50:08 | 2026-06-10\17-50-08 | OK | 12495 file | 3252,0 MB
+  2026-06-10 17:50:08 | PULIZIA | 2026-06-09\17-50-12 | snapshot incompleto eliminato
   ```
 
 - `backup_AAAAMMGG_HHMMSS.log`: log dettagliato di robocopy per ogni esecuzione,
   utile per il troubleshooting. Segue la stessa soglia a calendario delle
-  cartelle-giorno, quindi restano i log degli ultimi `$RetainDays` giorni. Il
+  cartelle-giorno, quindi restano i log degli ultimi `$RetainDays` giorni: con
+  il valore corrente (1) restano solo quelli del giorno in corso. Il
   conteggio di file e dimensione nello storico e' calcolato in modo indipendente
   dalla lingua del sistema operativo.
 
@@ -325,10 +369,16 @@ Due log distinti in `_logs`:
    sorgente, senza copia.
 4. Premere No o lasciare scadere il timeout: non deve accadere nulla.
 5. Per la retention, creare a mano alcune cartelle `AAAA-MM-GG` con date vecchie
-   ed eseguire una copia valida: con `$RetainDays = 2` restano solo la cartella
-   di oggi e quella di ieri, le piu' vecchie vengono eliminate insieme ai loro
-   `backup_*.log`, lo storico resta intatto.
-6. Nell'Utilita' di pianificazione, avviare manualmente il task: deve comparire
+   ed eseguire una copia valida: con `$RetainDays = 1` resta solo la cartella di
+   oggi, tutte le precedenti vengono eliminate insieme ai loro `backup_*.log`,
+   lo storico resta intatto.
+6. Per la gestione delle copie incomplete, simulare uno snapshot difettoso: in
+   una cartella-giorno vecchia creare `AAAA-MM-GG\HH-mm-ss` con dentro un file
+   `_SNAPSHOT-INCOMPLETO.txt`, poi eseguire una copia valida. Lo snapshot marcato
+   deve essere eliminato, nello storico deve comparire una riga `PULIZIA` e la
+   cartella-giorno rimasta vuota deve sparire. Lo stesso vale per uno snapshot
+   marcato creato dentro la cartella-giorno di oggi.
+7. Nell'Utilita' di pianificazione, avviare manualmente il task: deve comparire
    il pop-up.
 
 ## 12. Ripristino
@@ -359,6 +409,9 @@ purge o mirror.
 - Gli snapshot sono copie multiple e indipendenti: piu' sicurezza nel ripristino
   di versioni recenti, maggiore occupazione di spazio.
 - La soluzione e' una copia, non un sistema di versionamento dei file.
+- Una copia con file mancanti non viene ritentata subito: l'engine la marca e
+  protegge l'ultima copia completa (sezione 9), ma il recupero avviene alla
+  successiva esecuzione confermata.
 - Per protezione contro ransomware o guasti, valutare una terza copia offline
   periodica secondo la regola 3-2-1.
 - Il pop-up appare solo a utente connesso, coerentemente con un disco di backup
