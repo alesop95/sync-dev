@@ -75,8 +75,16 @@ if (-not $src.Ok) {
 }
 
 # --- Lock anti-sovrapposizione --------------------------------------
+# Un mutex "abbandonato" (processo precedente terminato a forza mentre lo teneva)
+# viene comunque acquisito da WaitOne, che pero' lancia AbandonedMutexException:
+# lo trattiamo come lock ottenuto invece di far fallire lo script.
 $mutex = New-Object System.Threading.Mutex($false, 'Global\BackupSviluppo')
-if (-not $mutex.WaitOne(0)) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_OK }
+try { $locked = $mutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $locked = $true }
+if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; $mutex.Dispose(); exit $EXIT_OK }
+
+# Messaggio di avanzamento con orario, per chi lancia lo script a mano.
+function Write-Step([string]$msg) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" }
 
 try {
     $now     = Get-Date
@@ -85,6 +93,20 @@ try {
     New-Item -ItemType Directory -Force -Path $SnapDir | Out-Null
 
     $LogFile = Join-Path $LogDir ("backup_" + $now.ToString('yyyyMMdd_HHmmss') + ".log")
+
+    # Marcatura preventiva: lo snapshot nasce "incompleto" e il marcatore viene
+    # tolto solo se la copia termina bene. Cosi' anche un'interruzione (Ctrl+C,
+    # finestra chiusa, spegnimento) lascia lo snapshot parziale riconoscibile e
+    # le esecuzioni successive non lo scambiano per una copia completa.
+    $MarkerPath = Join-Path $SnapDir $MarkerName
+    Set-Content -LiteralPath $MarkerPath -Encoding UTF8 -Value @(
+        'SNAPSHOT INCOMPLETO: copia avviata e non conclusa (interrotta o in corso).'
+        ('Data:            ' + $now.ToString('yyyy-MM-dd HH:mm:ss'))
+        ('Log dettagliato: ' + (Split-Path $LogFile -Leaf))
+        ''
+        "Questo file e' la memoria per le esecuzioni successive: al primo backup"
+        'completo lo snapshot marcato viene eliminato automaticamente.'
+    )
 
     $RoboArgs = @(
         $Source, $SnapDir,
@@ -99,8 +121,12 @@ try {
     $RoboArgs += 'System Volume Information'; $RoboArgs += '$RECYCLE.BIN'
     $RoboArgs += '/XF'; $RoboArgs += $ExcludeFiles
 
+    Write-Step "Copia in corso: $Source -> $SnapDir"
+    Write-Step "Di solito richiede 10-15 minuti e fino alla fine non compare altro output. Non chiudere la finestra."
+    $t0 = Get-Date
     robocopy @RoboArgs
     $code = $LASTEXITCODE
+    Write-Step ("Copia terminata in {0:hh\:mm\:ss} (codice robocopy {1})." -f ((Get-Date) - $t0), $code)
 
     # robocopy puo' propagare alla destinazione gli attributi della radice sorgente
     # (molte radici di volume sono Nascosto+Sistema), rendendo lo snapshot invisibile
@@ -111,8 +137,13 @@ try {
         if ($it) { $it.Attributes = [System.IO.FileAttributes]::Directory }
     }
 
+    # Copia riuscita: via la marcatura preventiva prima del conteggio e della retention.
+    if ($code -lt 8) { Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue }
+
     # --- Storico cumulativo (append, senza retention) ---
-    $files  = @(Get-ChildItem -LiteralPath $SnapDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+    Write-Step "Conteggio dei file dello snapshot per lo storico (puo' richiedere qualche minuto)..."
+    $files  = @(Get-ChildItem -LiteralPath $SnapDir -Recurse -File -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ine $MarkerPath })
     $count  = $files.Count
     $sizeMB = if ($count) { [math]::Round((($files | Measure-Object -Property Length -Sum).Sum) / 1MB, 1) } else { 0 }
     $rel    = $now.ToString('yyyy-MM-dd') + '\' + $now.ToString('HH-mm-ss')
@@ -120,14 +151,16 @@ try {
     $line   = '{0} | {1} | {2} | {3} file | {4} MB' -f `
               $now.ToString('yyyy-MM-dd HH:mm:ss'), $rel, $stato, $count, $sizeMB
     Add-Content -LiteralPath $HistoryFile -Value $line -Encoding UTF8
+    Write-Step "Snapshot $rel | $stato | $count file | $sizeMB MB"
 
     # --- Memoria dell'esito: marca lo snapshot incompleto ---------------
     # Codice robocopy >= 8 = la copia e' arrivata in fondo ma alcuni file non
     # sono stati copiati. Lo snapshot resta (meglio parziale che niente) ma viene
     # marcato: le esecuzioni successive sanno che non e' affidabile e lo
-    # eliminano appena esiste una copia completa.
+    # eliminano appena esiste una copia completa. Il marcatore preventivo viene
+    # sovrascritto con il dettaglio dell'esito.
     if ($code -ge 8) {
-        Set-Content -LiteralPath (Join-Path $SnapDir $MarkerName) -Encoding UTF8 -Value @(
+        Set-Content -LiteralPath $MarkerPath -Encoding UTF8 -Value @(
             'SNAPSHOT INCOMPLETO: alcuni file non sono stati copiati.'
             ('Data:            ' + $now.ToString('yyyy-MM-dd HH:mm:ss'))
             ('Codice robocopy: ' + $code)
@@ -139,6 +172,8 @@ try {
         )
         Write-Host "Snapshot marcato come incompleto (codice $code)."
     }
+
+    Write-Step "Retention e pulizia degli snapshot vecchi o incompleti..."
 
     # --- Retention: conserva $RetainDays giorni SOLARI, oggi incluso (solo lato backup) ---
     # Il giorno corrente non va mai eliminato: contiene lo snapshot appena creato.
@@ -203,6 +238,8 @@ try {
         Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' -and $_.FullName -ine $DayDir } |
         Where-Object { -not (Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue) } |
         Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+
+    Write-Step "Backup concluso."
 }
 finally {
     $mutex.ReleaseMutex(); $mutex.Dispose()

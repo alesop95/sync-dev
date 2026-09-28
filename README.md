@@ -248,7 +248,12 @@ pop-up di conferma in primo piano, con timeout configurabile.
 
 Il task gira come utente loggato (non come SYSTEM), condizione necessaria per
 mostrare una finestra nella sessione interattiva. Un mutex globale impedisce
-esecuzioni sovrapposte. Gli esiti delle verifiche sono comunicati al pop-up
+esecuzioni sovrapposte; se un'esecuzione precedente e' stata terminata a forza
+il mutex risulta "abbandonato" e viene comunque acquisito.
+
+Lanciato a mano, l'engine stampa le fasi con l'orario (copia, conteggio,
+retention, fine). Durante la copia robocopy non mostra avanzamento (circa 10-15
+minuti con la sorgente attuale): la finestra non e' bloccata e non va chiusa. Gli esiti delle verifiche sono comunicati al pop-up
 tramite i codici di uscita della sezione 16.
 
 ## 8. Struttura su disco
@@ -257,7 +262,7 @@ tramite i codici di uscita della sezione 16.
 J:\backup-sviluppo\
   2026-06-09\
     12-31-04\
-      _SNAPSHOT-INCOMPLETO.txt   (solo se la copia ha avuto file mancanti)
+      _SNAPSHOT-INCOMPLETO.txt   (solo se la copia e' stata interrotta o ha avuto file mancanti)
     17-50-12\
   _logs\
     storico-snapshot.txt
@@ -270,8 +275,10 @@ in `$ExcludeDirs`). In una giornata possono esistere da zero a due sottocartelle
 Con `$RetainDays = 1` esiste una sola cartella-giorno alla volta, quella
 corrente: le precedenti vengono eliminate a fine copia (sezione 9).
 
-`_SNAPSHOT-INCOMPLETO.txt` e' il file sentinella che marca uno snapshot in cui
-robocopy non ha copiato tutti i file (codice di uscita >= 8). Vive dentro la
+`_SNAPSHOT-INCOMPLETO.txt` e' il file sentinella che marca uno snapshot non
+affidabile: robocopy non ha copiato tutti i file (codice di uscita >= 8) oppure
+la copia non si e' conclusa (Ctrl+C, finestra chiusa, spegnimento). Il file viene
+scritto all'inizio della copia e rimosso solo se termina bene. Vive dentro la
 cartella dello snapshot, quindi la marcatura sopravvive alla fine dello script:
 e' la memoria che le esecuzioni successive leggono per sapere cosa conservare e
 cosa buttare (sezione 9). Contiene data, codice robocopy e nome del log
@@ -306,9 +313,11 @@ copia disponibile: robocopy puo' arrivare in fondo e restituire un codice >= 8
 perche' alcuni file non sono stati copiati (file bloccati da un processo, errori
 di I/O, spazio esaurito, permessi). Per questo l'engine tiene traccia dell'esito:
 
-1. **Marcatura.** Se il codice e' >= 8, nella cartella dello snapshot viene
-   scritto `_SNAPSHOT-INCOMPLETO.txt`. Lo snapshot non viene eliminato: una copia
-   parziale e' meglio di nessuna copia.
+1. **Marcatura.** All'avvio della copia nella cartella dello snapshot viene
+   scritto `_SNAPSHOT-INCOMPLETO.txt`, che viene tolto solo se il codice e' < 8.
+   Se il codice e' >= 8 il file viene riscritto con codice e log; se lo script
+   viene interrotto il file resta com'e'. Lo snapshot non viene eliminato: una
+   copia parziale e' meglio di nessuna copia.
 2. **Finestra allargata.** Nella stessa esecuzione la finestra di retention si
    estende fino a comprendere il giorno dell'ultimo snapshot **completo**, che
    non viene quindi cancellato. Se non esiste alcuno snapshot completo, viene
