@@ -112,6 +112,15 @@ Cartelle escluse di default (rigenerabili nei progetti full-stack):
 La cartella `.git` e' inclusa per default; per escluderla, rimuovere il commento
 alla riga relativa.
 
+File esclusi di default: `*.tmp`, `Thumbs.db`, `.DS_Store`, e dal 2026-09-30 i
+backup di macchina Veeam Agent, cioe' `*.vbk` (full), `*.vib` (incrementale) e
+`*.vbm` (metadati), per estensione e a ogni profondita'. Un punto di ripristino
+pesa decine di GB e non cambia: se finisse sotto la sorgente verrebbe ricopiato
+ogni giorno sull'SSD per duplicare una copia statica. L'esclusione vale finche' i
+backup non avranno una destinazione propria sul NAS domestico. Le estensioni
+vengono dalla guida "Types of Backup Files" di Veeam Agent for Linux:
+https://helpcenter.veeam.com/docs/agentforlinux/userguide/backup_files.html
+
 ## 4. Verifica dell'identita' del disco di backup
 
 Prima di ogni copia, l'engine controlla che la lettera attesa esista e punti
