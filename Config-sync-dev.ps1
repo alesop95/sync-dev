@@ -37,7 +37,13 @@ $ExcludeDirs = @(
     'E:\legal-consultant\data'
     # '.git'   # escludi SOLO se ogni repo e' gia' su un remoto
 )
-$ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store')
+# Backup di macchina Veeam Agent (full .vbk, incrementale .vib, metadati .vbm, secondo
+# la guida "Types of Backup Files" di Veeam Agent for Linux): un punto di ripristino e'
+# di decine di GB e non cambia, quindi ricopiarlo ogni giorno su J: duplicherebbe una copia
+# statica e consumerebbe l'SSD. Esclusi per estensione, a ogni profondita', finche' i backup
+# non avranno una destinazione propria sul NAS. Aggiunto il 2026-09-30, PA-013 del progetto
+# diy-2way-monitors-home (MS-169).
+$ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store','*.vbk','*.vib','*.vbm')
 
 # Codici di uscita per comunicare l'esito al chiamante
 $EXIT_OK              = 0
