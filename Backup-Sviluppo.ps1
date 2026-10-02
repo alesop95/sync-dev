@@ -33,6 +33,10 @@ function Remove-TreeFast([string]$path) {
 # e' la memoria che le esecuzioni successive leggono per sapere cosa buttare.
 $MarkerName = '_SNAPSHOT-INCOMPLETO.txt'
 
+# Rapporto scritto in _logs quando la copia fallisce: spiega cosa e' successo e
+# come rilanciare subito. Viene eliminato dal primo backup riuscito.
+$FailReportName = 'BACKUP-FALLITO-RILANCIARE.txt'
+
 # Elenco degli snapshot presenti (cartelle AAAA-MM-GG\HH-mm-ss), con il giorno di
 # appartenenza e l'indicazione se sono marcati come incompleti.
 function Get-Snapshots {
@@ -166,9 +170,9 @@ try {
             ('Codice robocopy: ' + $code)
             ('Log dettagliato: ' + (Split-Path $LogFile -Leaf))
             ''
-            "Questo file e' la memoria per le esecuzioni successive: al primo backup"
-            'completo lo snapshot marcato viene eliminato automaticamente. Fino a'
-            'quel momento la retention conserva anche l ultimo snapshot completo.'
+            'Se su disco esiste una copia completa, questo snapshot viene eliminato'
+            "subito; se resta, e' perche' non esiste nessuna copia completa e verra'"
+            'eliminato al primo backup completo.'
         )
         Write-Host "Snapshot marcato come incompleto (codice $code)."
     }
@@ -187,13 +191,13 @@ try {
     # finestra si allarga fino a comprendere il giorno dell'ultimo snapshot
     # completo, che resta l'unica copia buona e non va cancellata.
     if ($code -ge 8) {
-        $keep = $good | Sort-Object Date -Descending | Select-Object -First 1
+        $keep = $good | Sort-Object Rel -Descending | Select-Object -First 1
         $what = 'ultimo snapshot completo'
         if (-not $keep) {
             # Nessuno snapshot completo su disco: si protegge comunque quello
             # precedente, che puo' contenere i file mancati stavolta.
             $keep = $snaps | Where-Object { $_.Path -ine $SnapDir } |
-                    Sort-Object Date -Descending | Select-Object -First 1
+                    Sort-Object Rel -Descending | Select-Object -First 1
             $what = 'snapshot precedente (nessuno completo disponibile)'
         }
         if ($keep -and $keep.Date -lt $cutoff) {
@@ -226,6 +230,140 @@ try {
                 Remove-TreeFast $_.FullName
             }
         }
+
+    # --- Retention per snapshot: restano solo gli ultimi $RetainSnapshots completi ---
+    # Agisce dentro la finestra a calendario, quindi anche sugli snapshot di oggi:
+    # con 1, la copia del pomeriggio sostituisce quella del mattino. Se la copia
+    # ha avuto errori, lo snapshot appena creato e' difettoso e viene eliminato
+    # anch'esso: resta solo l'ultima copia completa. Unica eccezione: se su disco
+    # non esiste nessuna copia completa, lo snapshot difettoso e $keep restano,
+    # perche' una copia parziale e' meglio di nessuna copia.
+    if ($RetainSnapshots -lt 1) { $RetainSnapshots = 1 }
+    $snaps     = @(Get-Snapshots)
+    $latest    = @($snaps | Where-Object { -not $_.Broken } |
+                 Sort-Object Rel -Descending | Select-Object -First $RetainSnapshots)
+    $keepPaths = @($latest | ForEach-Object { $_.Path })
+    if ($code -lt 8 -or $latest.Count -eq 0) { $keepPaths += $SnapDir }
+    if ($code -ge 8 -and $latest.Count -eq 0 -and $keep) { $keepPaths += $keep.Path }
+    foreach ($s in @($snaps | Where-Object { $keepPaths -notcontains $_.Path })) {
+        if ($s.Path -ieq $SnapDir) {
+            Write-Host "Retention: elimino lo snapshot difettoso appena creato $($s.Rel)"
+            Remove-TreeFast $s.Path
+            $scr = '{0} | SCARTATO | {1} | snapshot difettoso eliminato, resta {2} -> vedi {3}' -f `
+                   $now.ToString('yyyy-MM-dd HH:mm:ss'), $s.Rel, $latest[0].Rel, $FailReportName
+            Add-Content -LiteralPath $HistoryFile -Value $scr -Encoding UTF8
+        } else {
+            Write-Host "Retention: elimino lo snapshot $($s.Rel) (si conservano gli ultimi $RetainSnapshots)"
+            Remove-TreeFast $s.Path
+        }
+    }
+
+    # --- Rapporto di fallimento: come rilanciare subito -----------------
+    # Copia riuscita: il rapporto di un fallimento precedente non serve piu'.
+    # Copia con errori: rapporto verboso in _logs, sovrascritto a ogni
+    # fallimento, con esito, file non copiati e comandi per rilanciare.
+    $FailReport = Join-Path $LogDir $FailReportName
+    if ($code -lt 8) {
+        Remove-Item -LiteralPath $FailReport -Force -ErrorAction SilentlyContinue
+    } else {
+        $codeMeaning = @()
+        if ($code -band 16) { $codeMeaning += '16 = errore grave: robocopy si e'' fermato (destinazione non raggiungibile, accesso negato, disco pieno o scollegato).' }
+        if ($code -band 8)  { $codeMeaning += '8 = alcuni file o cartelle non sono stati copiati nemmeno al nuovo tentativo (file in uso, permessi, I/O, spazio).' }
+
+        # Errori dal log robocopy (ERROR in inglese, ERRORE in italiano) con la
+        # riga successiva, che ne riporta la descrizione. Un file che fallisce
+        # anche al nuovo tentativo compare piu' volte: si deduplica.
+        $errs = @()
+        if (Test-Path -LiteralPath $LogFile) {
+            # robocopy scrive il log nella code page OEM della console.
+            $errs = @(Get-Content -LiteralPath $LogFile -Encoding Oem |
+                      Select-String -Pattern '\bERRORE?\s+\d+\s+\(0x' -Context 0,1 |
+                      ForEach-Object {
+                          $l = ($_.Line -replace '^\S+\s+\S+\s+', '').Trim()
+                          $m = if ($_.Context.PostContext) { $_.Context.PostContext[0].Trim() } else { '' }
+                          if ($m) { $l + "`r`n      " + $m } else { $l }
+                      } | Select-Object -Unique)
+        }
+        $maxErr = 40
+
+        $drv  = Get-PSDrive -Name $ExpectedDriveLetter -ErrorAction SilentlyContinue
+        $free = if ($drv) { '{0:N1} GB' -f ($drv.Free / 1GB) } else { 'non rilevabile' }
+
+        if ($latest.Count -gt 0) {
+            $esito = @(
+                "Lo snapshot difettoso $rel e' stato ELIMINATO."
+                ("Su disco resta solo l'ultima copia completa: " + $latest[0].Rel)
+                ('(' + $latest[0].Path + ')')
+            )
+        } else {
+            $esito = @(
+                "Su disco NON esiste nessuna copia completa: lo snapshot difettoso $rel"
+                "e' stato CONSERVATO (marcato $MarkerName), perche' una copia"
+                "parziale e' meglio di nessuna copia. Verra' eliminato al primo backup completo."
+            )
+        }
+
+        if ($errs.Count) {
+            $errLines = @($errs | Select-Object -First $maxErr | ForEach-Object { '  ' + $_ })
+            if ($errs.Count -gt $maxErr) { $errLines += "  ... altri $($errs.Count - $maxErr): vedi il log robocopy." }
+        } else {
+            $errLines = @(
+                '  Nessuna riga ERROR nel log: con codice 16 la copia potrebbe essersi fermata'
+                '  subito; controlla le ultime righe del log robocopy.'
+            )
+        }
+
+        $engine = Join-Path $PSScriptRoot 'Backup-Sviluppo.ps1'
+        $popup  = Join-Path $PSScriptRoot 'Backup-Conferma.ps1'
+        $report = @(
+            '================================================================'
+            ' BACKUP FALLITO - DA RILANCIARE'
+            '================================================================'
+            ''
+            ('Tentativo:        ' + $now.ToString('yyyy-MM-dd HH:mm:ss'))
+            ('Sorgente:         ' + $Source)
+            ('Destinazione:     ' + $SnapDir)
+            ('Codice robocopy:  ' + $code)
+        )
+        $report += @($codeMeaning | ForEach-Object { '                  ' + $_ })
+        $report += @(
+            ('Spazio libero su ' + $ExpectedDriveLetter + ': ' + $free)
+            ('Log robocopy:     ' + $LogFile)
+            ''
+            '--- ESITO ------------------------------------------------------'
+        )
+        $report += $esito
+        $report += @(
+            ''
+            ('--- FILE NON COPIATI (errori distinti nel log: {0}) ------------' -f $errs.Count)
+        )
+        $report += $errLines
+        $report += @(
+            ''
+            '--- COME RILANCIARE SUBITO -------------------------------------'
+            '1. Chiudi i programmi che tengono aperti i file elencati sopra'
+            '   (IDE, Docker/WSL, database locali, client di sincronizzazione, Outlook).'
+            '   Errore 32 = file in uso da un altro processo; 5 = accesso negato;'
+            '   112 = spazio insufficiente su disco.'
+            ('2. Verifica che ' + $ExpectedDriveLetter + ': sia collegato e abbia spazio libero (ora: ' + $free + ').')
+            '3. Rilancia il backup da PowerShell, senza pop-up:'
+            ''
+            ('     powershell -NoProfile -ExecutionPolicy Bypass -File "' + $engine + '"')
+            ''
+            '   oppure con il pop-up di conferma:'
+            ''
+            ('     powershell -NoProfile -ExecutionPolicy Bypass -File "' + $popup + '"')
+            ''
+            "4. Se la nuova copia riesce, sostituisce l'ultima copia completa e"
+            '   questo file viene eliminato automaticamente. Se fallisce di nuovo,'
+            '   questo file viene riscritto con i nuovi errori.'
+        )
+        Set-Content -LiteralPath $FailReport -Value $report -Encoding UTF8
+        Write-Host ''
+        $report | ForEach-Object { Write-Host $_ }
+        Write-Host ''
+        Write-Host "Rapporto salvato in $FailReport"
+    }
 
     # Pulizia SOLO dei log dettagliati, sulla stessa soglia a calendario delle
     # cartelle-giorno; lo storico (storico-snapshot.txt) NON viene toccato.

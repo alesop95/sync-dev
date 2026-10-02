@@ -49,11 +49,21 @@ switch ($code) {
         $wshell.Popup("La $SourceLabel ($Source) non e' rilevata.`nBackup BLOCCATO. Puoi impostare un'altra sorgente in Config-sync-dev.ps1.", 0, "Backup Sviluppo - BLOCCATO", 48 + 4096)
     }
     default {
-        # Codice >= 8 = copia arrivata in fondo con file mancanti: l'engine ha
-        # marcato lo snapshot e ha conservato la copia completa precedente.
-        $extra = if ($code -ge 8) {
-            "`nLo snapshot e' stato marcato come INCOMPLETO: verra' eliminato al primo backup completo e fino ad allora l'ultima copia completa resta conservata."
-        } else { '' }
-        $wshell.Popup("Backup terminato con errori (codice $code).$extra`nControlla i log in $BackupRoot\_logs.", 30, "Backup Sviluppo", 48 + 4096)
+        # Codice >= 8 = copia con file mancanti: l'engine ha eliminato lo snapshot
+        # difettoso (resta solo l'ultima copia completa) e ha scritto in _logs il
+        # rapporto con gli errori e i comandi per rilanciare.
+        $report = Join-Path $BackupRoot '_logs\BACKUP-FALLITO-RILANCIARE.txt'
+        if ($code -ge 8 -and (Test-Path -LiteralPath $report)) {
+            # 4=Si'/No, 48=avviso; timeout 0 = resta aperto finche' non si risponde
+            $msg = "Backup terminato con errori (codice $code): alcuni file non sono stati copiati.`n`n" +
+                   "La copia difettosa e' stata scartata: su disco resta solo l'ultima copia completa.`n`n" +
+                   "Il rapporto con i file non copiati e i comandi per rilanciare subito e' in:`n$report`n`n" +
+                   "Apro il rapporto adesso?"
+            if ($wshell.Popup($msg, 0, "Backup Sviluppo - DA RILANCIARE", 4 + 48 + 4096) -eq 6) {
+                Start-Process notepad.exe -ArgumentList "`"$report`""
+            }
+        } else {
+            $wshell.Popup("Backup terminato con errori (codice $code).`nControlla i log in $BackupRoot\_logs.", 30, "Backup Sviluppo", 48 + 4096)
+        }
     }
 }
