@@ -23,6 +23,11 @@ $BackupRoot = ($ExpectedDriveLetter + ':\backup-sviluppo')
 # creato; tutte le cartelle-giorno precedenti vengono eliminate. Minimo 1.
 $RetainDays = 1
 
+# Snapshot completi conservati in totale, i piu' recenti. 1 = dopo ogni copia
+# riuscita resta solo lo snapshot appena creato: il backup del pomeriggio
+# sostituisce quello del mattino. Minimo 1.
+$RetainSnapshots = 1
+
 # Cartelle e file esclusi dalla copia (adatta allo stack)
 $ExcludeDirs = @(
     'node_modules', '.pnpm-store', '.pnpm',
