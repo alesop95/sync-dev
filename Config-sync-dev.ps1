@@ -48,7 +48,12 @@ $ExcludeDirs = @(
 # statica e consumerebbe l'SSD. Esclusi per estensione, a ogni profondita', finche' i backup
 # non avranno una destinazione propria sul NAS. Aggiunto il 2026-09-30, PA-013 del progetto
 # diy-2way-monitors-home (MS-169).
-$ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store','*.vbk','*.vib','*.vbm')
+# Messaggi di commit temporanei (_notes\COMMIT-MSG.txt e varianti): l'agente li scrive,
+# l'utente li consuma nel commit e li cancella, a volte proprio mentre robocopy sta
+# copiando, e il file sparito chiudeva il backup con ERRORE 2. Il contenuto finisce
+# comunque nella history git. Il suffisso .txt tiene fuori gli hook git 'commit-msg'
+# (senza estensione), che vanno salvati. Aggiunto il 2026-10-05.
+$ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store','*.vbk','*.vib','*.vbm','COMMIT-MSG*.txt')
 
 # Codici di uscita per comunicare l'esito al chiamante
 $EXIT_OK              = 0

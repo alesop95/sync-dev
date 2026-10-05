@@ -124,6 +124,13 @@ backup non avranno una destinazione propria sul NAS domestico. Le estensioni
 vengono dalla guida "Types of Backup Files" di Veeam Agent for Linux:
 https://helpcenter.veeam.com/docs/agentforlinux/userguide/backup_files.html
 
+Dal 2026-10-05 sono esclusi anche i messaggi di commit temporanei,
+`COMMIT-MSG*.txt` (tipicamente `_notes\COMMIT-MSG.txt`). Vengono consumati da un
+commit e cancellati, a volte mentre la copia e' in corso: robocopy trovava il
+file in elenco ma non piu' su disco e chiudeva con `ERRORE 2 (0x00000002)`. Il
+loro contenuto resta comunque nella history git. Il suffisso `.txt` evita di
+escludere gli hook git `commit-msg`, che non hanno estensione.
+
 ## 4. Verifica dell'identita' del disco di backup
 
 Prima di ogni copia, l'engine controlla che la lettera attesa esista e punti
