@@ -22,6 +22,7 @@ $wshell = New-Object -ComObject WScript.Shell
 # 4=Si'/No, 32=domanda, 4096=system modal. Ritorni: 6=Si', 7=No, -1=timeout
 $msg = "E' l'ora del backup dei progetti di sviluppo.`n`n" +
        "Verifica che il disco di backup ($ExpectedDiskModel) sia collegato come ${ExpectedDriveLetter}:, poi conferma.`n`n" +
+       "Attendi l'esito finale prima di richiedere la rimozione sicura: dopo la copia restano verifica e pulizia.`n`n" +
        "Eseguo il backup adesso?"
 $ans = $wshell.Popup($msg, $Timeout, "Backup Sviluppo", 4 + 32 + 4096)
 if ($ans -ne 6) { return }
@@ -34,7 +35,7 @@ $code = $p.ExitCode
 switch ($code) {
     0 {
         # 64=info; si chiude da solo dopo 10s
-        $wshell.Popup("Backup completato correttamente.", 10, "Backup Sviluppo", 64 + 4096)
+        $wshell.Popup("Copia, verifica e pulizia completate correttamente.`nPuoi richiedere la rimozione sicura del disco da Windows.", 10, "Backup Sviluppo", 64 + 4096)
     }
     101 {
         # disco con lettera attesa ma dispositivo sbagliato. 16=stop, timeout 0 = resta aperto
@@ -48,6 +49,15 @@ switch ($code) {
         # sorgente non rilevata. 48=avviso
         $wshell.Popup("La $SourceLabel ($Source) non e' rilevata.`nBackup BLOCCATO. Puoi impostare un'altra sorgente in Config-sync-dev.ps1.", 0, "Backup Sviluppo - BLOCCATO", 48 + 4096)
     }
+    104 {
+        $wshell.Popup("Il volume ${ExpectedDriveLetter}: non e' sano o il suo stato non e' verificabile.`nCopia e pulizia BLOCCATE. Controlla e ripara il disco, poi rilancia.`n`nDettagli locali: $PSScriptRoot\_logs\BACKUP-ERRORE.txt", 0, "Backup Sviluppo - VOLUME DA CONTROLLARE", 16 + 4096)
+    }
+    105 {
+        $wshell.Popup("Il backup non si e' concluso: errore durante verifica, scrittura dei log o pulizia.`nI residui di cancellazioni interrotte verranno ripresi al prossimo backup con volume sano.`n`nDettagli locali: $PSScriptRoot\_logs\BACKUP-ERRORE.txt", 0, "Backup Sviluppo - NON CONCLUSO", 48 + 4096)
+    }
+    106 {
+        $wshell.Popup("Un backup e' gia' in corso. Attendi il suo esito prima di richiedere la rimozione sicura del disco.", 15, "Backup Sviluppo", 48 + 4096)
+    }
     default {
         # Codice >= 8 = copia con file mancanti: l'engine ha eliminato lo snapshot
         # difettoso (resta solo l'ultima copia completa) e ha scritto in _logs il
@@ -56,7 +66,7 @@ switch ($code) {
         if ($code -ge 8 -and (Test-Path -LiteralPath $report)) {
             # 4=Si'/No, 48=avviso; timeout 0 = resta aperto finche' non si risponde
             $msg = "Backup terminato con errori (codice $code): alcuni file non sono stati copiati.`n`n" +
-                   "La copia difettosa e' stata scartata: su disco resta solo l'ultima copia completa.`n`n" +
+                   "Il rapporto indica se la copia difettosa e' stata scartata o conservata in assenza di una copia completa.`n`n" +
                    "Il rapporto con i file non copiati e i comandi per rilanciare subito e' in:`n$report`n`n" +
                    "Apro il rapporto adesso?"
             if ($wshell.Popup($msg, 0, "Backup Sviluppo - DA RILANCIARE", 4 + 48 + 4096) -eq 6) {

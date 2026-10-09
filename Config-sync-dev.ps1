@@ -60,6 +60,9 @@ $EXIT_OK              = 0
 $EXIT_DEVICE_MISMATCH = 101    # disco con la lettera attesa ma NON e' il dispositivo atteso
 $EXIT_SOURCE_MISSING  = 102    # sorgente non rilevata
 $EXIT_DEVICE_MISSING  = 103    # nessun disco con la lettera attesa
+$EXIT_VOLUME_UNHEALTHY = 104   # volume degradato o stato non verificabile
+$EXIT_IO_FAILURE       = 105   # conteggio, log o pulizia non conclusi
+$EXIT_ALREADY_RUNNING  = 106   # backup gia' in corso, nessuna nuova copia
 
 # ===== Funzioni =====================================================
 
@@ -106,6 +109,9 @@ function Test-SourceAvailable {
     }
     return $r
 }
+
+# Controlli del volume e pulizia verificata, senza riparazioni automatiche.
+. (Join-Path $PSScriptRoot 'Sicurezza-Backup.ps1')
 
 # ===== Override locale (non versionato) =============================
 # Se esiste config.local.ps1 nella stessa cartella, viene caricato qui e puo'
