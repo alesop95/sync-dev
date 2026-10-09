@@ -3,11 +3,13 @@
     Snapshot datati con retention. Parametri e verifiche in Config-sync-dev.ps1.
     Prima di copiare verifica che:
       1) il disco di backup sia ESATTAMENTE quello atteso (modello e, se impostato, serial);
-      2) la sorgente sia presente.
-    Se una delle due fallisce, NON copia e NON cancella nulla, ed esce con un codice dedicato.
+      2) il volume sia sano e operativo;
+      3) la sorgente sia presente.
+    Se una verifica fallisce, NON copia e NON cancella nulla, ed esce con un codice dedicato.
     Cancella SOLO dentro $BackupRoot. La sorgente non viene MAI toccata.
 #>
 
+$ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Config-sync-dev.ps1')
 
 # Se la configurazione non si e' caricata (file bloccato o assente), esci con messaggio.
@@ -17,16 +19,6 @@ if (-not $BackupRoot) {
 }
 
 $LogDir = Join-Path $BackupRoot '_logs'
-
-# Cancellazione robusta anche per alberi profondi (long path safe)
-function Remove-TreeFast([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return }
-    $empty = Join-Path $env:TEMP ('empty_' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $empty | Out-Null
-    robocopy $empty $path /MIR /NJH /NJS /NP /NFL /NDL /R:1 /W:1 | Out-Null
-    Remove-Item -LiteralPath $path  -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
-}
 
 # Nome del file sentinella che marca uno snapshot incompleto. Vive dentro la
 # cartella dello snapshot, quindi la marcatura sopravvive alla fine dello script:
@@ -40,24 +32,64 @@ $FailReportName = 'BACKUP-FALLITO-RILANCIARE.txt'
 # Elenco degli snapshot presenti (cartelle AAAA-MM-GG\HH-mm-ss), con il giorno di
 # appartenenza e l'indicazione se sono marcati come incompleti.
 function Get-Snapshots {
-    Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+    $pending = @(Get-PendingCleanup)
+    Get-ChildItem -LiteralPath $BackupRoot -Directory -Force -ErrorAction Stop |
         Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } |
         ForEach-Object {
             $dayName = $_.Name
-            Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue |
+            $null = Assert-BackupRemovalPath $_.FullName
+            Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction Stop |
                 Where-Object { $_.Name -match '^\d{2}-\d{2}-\d{2}$' } |
                 ForEach-Object {
+                    $null = Assert-BackupRemovalPath $_.FullName
                     [pscustomobject]@{
                         Day    = $dayName
                         Date   = [datetime]::ParseExact($dayName, 'yyyy-MM-dd', $null)
                         Rel    = $dayName + '\' + $_.Name
                         Path   = $_.FullName
-                        Broken = Test-Path -LiteralPath (Join-Path $_.FullName $MarkerName)
+                        Broken = (Test-Path -LiteralPath (Join-Path $_.FullName $MarkerName) -ErrorAction Stop) -or
+                                 ($pending -contains ($dayName + '\' + $_.Name)) -or
+                                 (($pending -contains $dayName) -and $_.FullName -ine $SnapDir)
                     }
                 }
         }
 }
 
+# Recupera pulizie interrotte e copie incomplete prima di copiare, cosi' i
+# residui non occupano spazio inutilmente. Occorre una copia completa da tenere.
+function Clear-BackupResidues {
+    $snaps = @(Get-Snapshots)
+    if (@($snaps | Where-Object { -not $_.Broken }).Count -eq 0) { return }
+    foreach ($relative in @(Get-PendingCleanup)) {
+        $path = Assert-BackupRemovalPath (Join-Path $BackupRoot $relative)
+        # Mai eliminare il giorno corrente o lo snapshot appena creato.
+        if ($path -ieq $DayDir -or $path -ieq $SnapDir) { continue }
+        Write-Step "Riprendo la pulizia pendente: $relative"
+        Remove-TreeFast $path
+        Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
+            '{0} | PULIZIA | {1} | residuo di cancellazione eliminato' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $relative)
+    }
+    foreach ($snapshot in @($snaps | Where-Object { $_.Broken -and $_.Path -ine $SnapDir })) {
+        if (-not (Test-Path -LiteralPath $snapshot.Path -ErrorAction Stop)) { continue }
+        Write-Step "Pulizia: elimino lo snapshot incompleto $($snapshot.Rel)"
+        Remove-TreeFast $snapshot.Path
+        Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
+            '{0} | PULIZIA | {1} | snapshot incompleto eliminato' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $snapshot.Rel)
+    }
+    Get-ChildItem -LiteralPath $BackupRoot -Directory -Force -ErrorAction Stop |
+        Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' -and $_.FullName -ine $DayDir } |
+        ForEach-Object {
+            if (@(Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction Stop).Count -eq 0) {
+                Remove-TreeFast $_.FullName
+            }
+        }
+}
+
+function Write-Step([string]$msg) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" }
+$mutex = $null
+$locked = $false
+$code = 16
+try {
 # --- Guardia 1: il disco di backup e' quello atteso? ----------------
 $dev = Test-BackupDevice
 if (-not $dev.Ok) {
@@ -65,11 +97,21 @@ if (-not $dev.Ok) {
     if ($dev.Status -eq 'NODISK') { exit $EXIT_DEVICE_MISSING } else { exit $EXIT_DEVICE_MISMATCH }
 }
 
-# Da qui il disco e' verificato: possiamo scrivere log su $BackupRoot
+# --- Guardia 2: volume sano, prima di qualsiasi scrittura sul backup --
+$volume = Test-BackupVolume
+if (-not $volume.Ok) {
+    Write-Step "BLOCCATO: $($volume.Reason)"
+    Write-LocalBackupError $volume.Reason
+    exit $EXIT_VOLUME_UNHEALTHY
+}
+$null = Assert-BackupRoot
+$null = Get-CleanupJournalPath
+
+# Da qui dispositivo, volume e percorso sono verificati.
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $HistoryFile = Join-Path $LogDir 'storico-snapshot.txt'
 
-# --- Guardia 2: sorgente presente? ----------------------------------
+# --- Guardia 3: sorgente presente? ----------------------------------
 $src = Test-SourceAvailable
 if (-not $src.Ok) {
     $blk = '{0} | BLOCCATO | {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $src.Reason
@@ -85,16 +127,15 @@ if (-not $src.Ok) {
 $mutex = New-Object System.Threading.Mutex($false, 'Global\BackupSviluppo')
 try { $locked = $mutex.WaitOne(0) }
 catch [System.Threading.AbandonedMutexException] { $locked = $true }
-if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; $mutex.Dispose(); exit $EXIT_OK }
+if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY_RUNNING }
 
-# Messaggio di avanzamento con orario, per chi lancia lo script a mano.
-function Write-Step([string]$msg) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $msg" }
-
-try {
     $now     = Get-Date
     $DayDir  = Join-Path $BackupRoot $now.ToString('yyyy-MM-dd')
     $SnapDir = Join-Path $DayDir     $now.ToString('HH-mm-ss')
-    New-Item -ItemType Directory -Force -Path $SnapDir | Out-Null
+    $null = Assert-BackupRemovalPath $SnapDir
+    Clear-BackupResidues
+    New-Item -ItemType Directory -Force -Path $DayDir | Out-Null
+    New-Item -ItemType Directory -Path $SnapDir | Out-Null
 
     $LogFile = Join-Path $LogDir ("backup_" + $now.ToString('yyyyMMdd_HHmmss') + ".log")
 
@@ -137,19 +178,20 @@ try {
     # in Esplora risorse pur contenendo i dati. Riportiamo le cartelle dello snapshot
     # a "directory normale".
     foreach ($d in @($DayDir, $SnapDir)) {
-        $it = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+        $it = Get-Item -LiteralPath $d -Force -ErrorAction Stop
         if ($it) { $it.Attributes = [System.IO.FileAttributes]::Directory }
     }
 
-    # Copia riuscita: via la marcatura preventiva prima del conteggio e della retention.
-    if ($code -lt 8) { Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue }
-
     # --- Storico cumulativo (append, senza retention) ---
     Write-Step "Conteggio dei file dello snapshot per lo storico (puo' richiedere qualche minuto)..."
-    $files  = @(Get-ChildItem -LiteralPath $SnapDir -Recurse -File -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -ine $MarkerPath })
-    $count  = $files.Count
-    $sizeMB = if ($count) { [math]::Round((($files | Measure-Object -Property Length -Sum).Sum) / 1MB, 1) } else { 0 }
+    $stats = Get-SnapshotFileStats $SnapDir $MarkerPath
+    $count = $stats.Count
+    $sizeMB = [math]::Round($stats.Bytes / 1MB, 1)
+    # Una copia e' completa solo dopo un conteggio leggibile e un nuovo controllo
+    # del volume. Se qualcosa fallisce, restano il marcatore e le copie precedenti.
+    $volume = Test-BackupVolume
+    if (-not $volume.Ok) { throw $volume.Reason }
+    if ($code -lt 8) { Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction Stop }
     $rel    = $now.ToString('yyyy-MM-dd') + '\' + $now.ToString('HH-mm-ss')
     $stato  = if ($code -lt 8) { 'OK' } else { "ERRORI (codice $code) -> vedi $(Split-Path $LogFile -Leaf)" }
     $line   = '{0} | {1} | {2} | {3} file | {4} MB' -f `
@@ -211,17 +253,9 @@ try {
     # cartella-giorno corrente, dove la finestra a calendario non arriverebbe. Se
     # non esiste ancora nessuno snapshot completo non si tocca nulla: meglio una
     # copia parziale che nessuna copia.
-    if ($good.Count -gt 0) {
-        foreach ($s in @($snaps | Where-Object { $_.Broken -and $_.Path -ine $SnapDir })) {
-            Write-Host "Pulizia: elimino lo snapshot incompleto $($s.Rel)"
-            Remove-TreeFast $s.Path
-            $pul = '{0} | PULIZIA | {1} | snapshot incompleto eliminato' -f `
-                   $now.ToString('yyyy-MM-dd HH:mm:ss'), $s.Rel
-            Add-Content -LiteralPath $HistoryFile -Value $pul -Encoding UTF8
-        }
-    }
+    Clear-BackupResidues
 
-    Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $BackupRoot -Directory -Force -ErrorAction Stop |
         Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' } |
         ForEach-Object {
             $d = [datetime]::ParseExact($_.Name, 'yyyy-MM-dd', $null)
@@ -264,7 +298,9 @@ try {
     # fallimento, con esito, file non copiati e comandi per rilanciare.
     $FailReport = Join-Path $LogDir $FailReportName
     if ($code -lt 8) {
-        Remove-Item -LiteralPath $FailReport -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $FailReport -ErrorAction Stop) {
+            Remove-Item -LiteralPath $FailReport -Force -ErrorAction Stop
+        }
     } else {
         $codeMeaning = @()
         if ($code -band 16) { $codeMeaning += '16 = errore grave: robocopy si e'' fermato (destinazione non raggiungibile, accesso negato, disco pieno o scollegato).' }
@@ -367,20 +403,36 @@ try {
 
     # Pulizia SOLO dei log dettagliati, sulla stessa soglia a calendario delle
     # cartelle-giorno; lo storico (storico-snapshot.txt) NON viene toccato.
-    Get-ChildItem -LiteralPath $LogDir -Filter 'backup_*.log' -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $LogDir -Filter 'backup_*.log' -ErrorAction Stop |
         Where-Object { $_.LastWriteTime -lt $cutoff } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+        Remove-Item -Force -ErrorAction Stop
 
     # Cartelle-giorno rimaste vuote dopo le pulizie (mai quella corrente).
-    Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $BackupRoot -Directory -Force -ErrorAction Stop |
         Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' -and $_.FullName -ine $DayDir } |
-        Where-Object { -not (Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue) } |
-        Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        ForEach-Object {
+            if (@(Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction Stop).Count -eq 0) {
+                Remove-TreeFast $_.FullName
+            }
+        }
 
-    Write-Step "Backup concluso."
+    if ($code -lt 8) {
+        Write-Step "Copia, verifica e pulizia concluse. Puoi richiedere la rimozione sicura del disco."
+    } else {
+        Write-Step "Backup terminato con errori di copia (codice $code). Consulta il rapporto prima di rilanciare."
+    }
+}
+catch {
+    $reason = $_.Exception.Message
+    Write-Step "BACKUP NON CONCLUSO: $reason"
+    Write-LocalBackupError $reason
+    exit $EXIT_IO_FAILURE
 }
 finally {
-    $mutex.ReleaseMutex(); $mutex.Dispose()
+    if ($mutex) {
+        if ($locked) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
 }
 
 if ($code -lt 8) { exit $EXIT_OK } else { exit $code }

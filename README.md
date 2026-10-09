@@ -14,6 +14,11 @@ Caratteristiche principali:
   numero di serie). Tutto e' parametrizzabile in un unico file.
 - Verifica della sorgente: se la sorgente non e' rilevata, la copia si blocca e
   viene mostrato un alert; la sorgente puo' essere riconfigurata in un punto solo.
+- Verifica del volume prima delle scritture e dopo la copia: serve lo stato
+  `Healthy / OK`. Un volume degradato o non verificabile blocca copia e pulizia.
+- Pulizia verificata e ripresa dei residui: le cancellazioni iniziate restano
+  registrate fuori dall'albero eliminato finche' la rimozione non e' confermata.
+  Gli errori di I/O o retention impediscono di dichiarare riuscita l'esecuzione.
 - Snapshot datati con retention a finestra di giorni solari (oggi incluso) e
   sul numero di snapshot: resta solo l'ultima copia completa.
 - Memoria degli snapshot incompleti: se robocopy termina con file mancanti, lo
@@ -69,12 +74,14 @@ Valori predefiniti (modificabili, vedi sezione 3):
 | File | Ruolo |
 |------|-------|
 | `Config-sync-dev.ps1` | Parametri e funzioni condivise (caricato dagli altri script) |
+| `Sicurezza-Backup.ps1` | Stato del volume, confini della pulizia, registro delle cancellazioni pendenti e diagnostica locale |
 | `Backup-Sviluppo.ps1` | Verifica disco e sorgente, crea lo snapshot, scrive i log, marca le copie incomplete, applica la retention |
 | `Backup-Conferma.ps1` | Mostra il pop-up; richiama l'engine e mostra esito o alert |
 | `Registra-Task-Conferma.ps1` | Registra il task pianificato (una tantum) |
 | `Mostra-Dischi.ps1` | Elenca i dischi collegati con lettera, modello, serial e bus |
 | `Imposta-LetteraJ.ps1` | Assegna la lettera attesa al disco atteso |
 | `README.md` | Questo documento |
+| `Test-Sicurezza.ps1` | Regressioni su file temporanei e volumi simulati, senza usare sorgente reale o disco di backup |
 
 File della modalita' automatica alternativa (non attivi, vedi sezione 15):
 
@@ -275,6 +282,20 @@ retention, fine). Durante la copia robocopy non mostra avanzamento (circa 10-15
 minuti con la sorgente attuale): la finestra non e' bloccata e non va chiusa. Gli esiti delle verifiche sono comunicati al pop-up
 tramite i codici di uscita della sezione 16.
 
+La fine della copia robocopy non coincide con la fine del backup: restano il
+conteggio, la verifica del volume e la pulizia, che possono durare diversi
+minuti con centinaia di migliaia di file. Attendere il messaggio finale, poi
+richiedere la rimozione sicura da Windows e attendere che sia autorizzata.
+Una richiesta di espulsione rifiutata significa che il dispositivo e' ancora
+occupato, anche se la fase di copia e' gia' terminata.
+
+Prima di ogni scrittura sul disco di backup, `Get-Volume` deve restituire
+`HealthStatus = Healthy` e tutti gli `OperationalStatus = OK`. In caso diverso,
+o se il controllo non riesce, l'engine si ferma con codice 104 e lascia il
+dettaglio in `_logs\BACKUP-ERRORE.txt` accanto agli script, sul disco locale.
+Il controllo viene ripetuto dopo il conteggio e prima di ogni cancellazione.
+L'engine non avvia riparazioni del volume.
+
 ## 8. Struttura su disco
 
 ```
@@ -287,6 +308,8 @@ J:\backup-sviluppo\
     storico-snapshot.txt
     backup_AAAAMMGG_HHMMSS.log
     BACKUP-FALLITO-RILANCIARE.txt   (solo dopo una copia con errori, fino al rilancio riuscito)
+    _pulizie-pendenti\             (solo finche' esistono cancellazioni non concluse)
+      AAAA-MM-GG_HH-mm-ss.txt      (un record per snapshot o giorno in eliminazione)
 ```
 
 Ogni esecuzione confermata e validata crea una cartella `AAAA-MM-GG\HH-mm-ss`
@@ -340,8 +363,26 @@ riesce e crea `2026-09-03\17-40-00`, poi elimina `12-00-00`. Se la copia delle
 `12-00-00`, con il rapporto per rilanciare (sezione successiva).
 
 La retention opera esclusivamente all'interno di `$BackupRoot`. La sorgente non
-viene mai modificata ne' cancellata. La rimozione delle cartelle usa un metodo
-robusto anche per alberi profondi.
+viene mai modificata ne' cancellata. Prima di ogni rimozione si verifica il
+percorso assoluto: sono ammessi solo giorni e snapshot datati sotto la radice;
+radice del volume, radice del backup, log e collegamenti negli antenati vengono
+rifiutati. La rimozione usa robocopy con `/MIR /XJ` e controlla il codice di
+uscita, poi elimina la directory solo se vuota. Un errore ferma la pulizia e
+restituisce 105, senza registrare una cancellazione riuscita.
+
+Prima della copia e dopo la verifica, se esiste una copia completa da conservare,
+si eliminano gli snapshot marcati incompleti, si riprendono le cancellazioni
+pendenti e si rimuovono i giorni vuoti. Questo libera lo spazio dei residui
+prima di creare un altro snapshot. La retention delle copie complete avviene
+dopo la nuova copia. Senza copie complete, le copie parziali vengono conservate.
+
+Ogni rimozione viene prima annotata in un file sotto `_logs\_pulizie-pendenti`,
+fuori dall'albero da cancellare, e tolta dal registro solo quando la directory
+non esiste piu'. Ogni operazione ha il proprio file: aggiornare un record non
+riscrive gli altri. Un'interruzione puo' eliminare il marcatore interno prima dei dati:
+il registro evita che il residuo venga scambiato per una copia completa. Una
+cartella ancora danneggiata puo' essere eliminata solo dopo la riparazione del
+volume, che resta manuale. Cartelle estranee agli snapshot non vengono ripulite.
 
 ### Copie incomplete
 
@@ -351,7 +392,8 @@ esaurito, permessi). Una copia cosi' non e' affidabile e non deve sostituire
 l'ultima copia completa. Per questo l'engine tiene traccia dell'esito:
 
 1. **Marcatura.** All'avvio della copia nella cartella dello snapshot viene
-   scritto `_SNAPSHOT-INCOMPLETO.txt`, che viene tolto solo se il codice e' < 8.
+   scritto `_SNAPSHOT-INCOMPLETO.txt`, che viene tolto solo se il codice e' < 8,
+   il conteggio dell'intero snapshot riesce e il volume resta sano.
    Se il codice e' >= 8 il file viene riscritto con codice e log; se lo script
    viene interrotto il file resta com'e'.
 2. **Finestra allargata.** Nella stessa esecuzione la finestra di retention si
@@ -380,7 +422,7 @@ difettoso viene conservato (insieme al precedente, che puo' contenere i file
 mancati stavolta), perche' una copia parziale e' meglio di nessuna copia. Il
 rapporto lo segnala.
 
-Il risultato e' che, dopo ogni esecuzione conclusa, sul disco resta sempre e solo
+Il risultato e' che, dopo ogni esecuzione conclusa correttamente, sul disco resta sempre e solo
 l'ultima copia completa e che una copia completa non viene mai sostituita da una
 difettosa.
 
@@ -419,7 +461,29 @@ Due log distinti in `_logs`:
   file non copiati e i comandi per rilanciare (sezione 9). Esiste solo finche'
   un backup non riesce.
 
+- `_pulizie-pendenti\`: memoria dei giorni o snapshot in eliminazione, con un
+  file per operazione e soli percorsi relativi validati. Resta fino al recupero
+  dei residui; un record illeggibile blocca la pulizia.
+
+Sul disco locale, nella cartella `_logs` accanto agli script, si trova anche
+`BACKUP-ERRORE.txt`: dettaglio cumulativo dei blocchi del volume e degli errori
+di verifica o pulizia. Rimane consultabile se il disco esterno sparisce; e'
+escluso da git insieme agli altri log. Una riga `OK` nello storico descrive lo
+snapshot copiato e contato; il successo dell'intera esecuzione richiede anche
+la pulizia e viene comunicato solo con codice 0 e il messaggio finale.
+
 ## 11. Verifica
+
+Regressioni automatiche, senza avviare un backup reale:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\sync-dev\Test-Sicurezza.ps1
+```
+
+Il test crea un albero temporaneo isolato e controlla volumi degradati,
+errori di conteggio, errori e ripresa della pulizia, protezione della sorgente,
+confini dei percorsi, collegamenti e alberi oltre 260 caratteri. I processi
+dell'engine usano solo configurazioni locali temporanee e una copia simulata.
 
 1. Con il disco di backup corretto collegato e con la lettera attesa, eseguire:
 
@@ -481,6 +545,31 @@ purge o mirror.
 - Permessi: se alcuni file non vengono copiati, impostare `-RunLevel Highest` in
   `Registra-Task-Conferma.ps1` e rieseguire lo script.
 
+### Corruzione o espulsione negata del disco esterno
+
+L'episodio diagnosticato il 2026-10-09 mostrava un volume exFAT con stato
+`Warning / Full Repair Needed`. Nei registri Windows del 5 e 6 ottobre erano
+presenti errori di scrittura del Samsung T7 e rimozioni improvvise nel registro
+`Microsoft-Windows-Storage-Storport/Operational` (evento 551). Il 6 ottobre
+alle 18:05:20 seguiva un nuovo tentativo di I/O (disk, 153), alle 18:05:34
+una scrittura rimandata fallita con perdita di dati (exfat, 141). Gli eventi
+Kernel-PnP 225 mostravano processi che impedivano l'espulsione, incluso l'engine
+di backup. Questi dati documentano una connessione persa durante scritture;
+non distinguono lo stacco manuale da un problema USB e non provano l'istante
+in cui si e' danneggiata la specifica cartella dell'8 ottobre.
+
+Con un volume degradato, chiudere i processi che lo usano e usare il controllo
+errori di Windows. Da PowerShell amministratore la verifica senza riparazione
+e' `chkdsk J:`; la riparazione richiesta manualmente e' `chkdsk J: /f` e agisce
+sull'intero volume. `/scan` e' un'opzione per NTFS, non per questo volume exFAT.
+Dopo la riparazione controllare `Get-Volume -DriveLetter J` e rilanciare il
+backup: riprendera' i residui registrati. Attendere sempre la rimozione sicura
+autorizzata da Windows. Se gli errori ritornano, verificare cavo, porta,
+alimentazione e dispositivo, oltre alla procedura di espulsione.
+
+Riferimenti Microsoft: [errori storage e corruzione](https://learn.microsoft.com/en-us/troubleshoot/windows-server/backup-and-storage/troubleshoot-data-corruption-and-disk-errors),
+[chkdsk](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/chkdsk).
+
 ## 14. Limiti
 
 - Gli snapshot sono copie multiple e indipendenti: piu' sicurezza nel ripristino
@@ -513,7 +602,10 @@ L'engine `Backup-Sviluppo.ps1` comunica l'esito al chiamante con questi codici:
 | 101 | Disco con la lettera attesa presente ma diverso dal dispositivo atteso |
 | 102 | Sorgente non rilevata |
 | 103 | Nessun disco con la lettera attesa collegato |
-| 8 o superiore | Errori riportati da robocopy (vedi log dettagliato) |
+| 104 | Volume degradato o non verificabile: nessuna copia o pulizia avviata |
+| 105 | Errore di I/O, verifica, log o pulizia: esecuzione non conclusa |
+| 106 | Backup gia' in corso: nessuna nuova copia avviata |
+| 8-16 | Errori riportati da robocopy (vedi log dettagliato) |
 
 ## 17. Controllo di versione e dati sensibili
 
@@ -528,16 +620,14 @@ Cosa controllare prima del primo commit:
   chiavi API. Il task viene registrato per l'utente corrente tramite variabili di
   ambiente risolte a runtime, quindi nessun nome utente o nome macchina viene
   scritto nei file.
-- Unico identificatore presente: il numero di serie del disco in
-  `Config-sync-dev.ps1` (`$ExpectedDiskSerial`). Non e' una credenziale, e' un
-  identificatore hardware, inutile senza accesso fisico al dispositivo. Per un
-  repository privato puo' restare nel file tracciato senza problemi.
-- Se si preferisce non versionare il numero di serie (per esempio se il
-  repository potrebbe diventare pubblico), si puo' usare un override locale non
-  tracciato: impostare `$ExpectedDiskSerial = ''` nel `Config-sync-dev.ps1`
-  tracciato e creare un file `config.local.ps1` (gia' escluso dal `.gitignore`)
-  con la riga `$ExpectedDiskSerial = '<serial reale>'`. Il file di configurazione
-  carica automaticamente `config.local.ps1` se presente.
+- Il numero di serie del disco resta solo nell'override locale non tracciato:
+  `$ExpectedDiskSerial = ''` nel `Config-sync-dev.ps1` versionato e
+  `$ExpectedDiskSerial = '<SERIALE_DISCO>'` in `config.local.ps1` (escluso dal
+  `.gitignore`). La configurazione carica automaticamente questo override.
+  Credenziali e identificativi reali non vanno inseriti nei file tracciati.
+
+Commit e push vengono eseguiti manualmente dall'utente, secondo le istruzioni
+di macchina e del repository. L'agente prepara e verifica le modifiche ai file.
 
 Sequenza per inizializzare il repository:
 
