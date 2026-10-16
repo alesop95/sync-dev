@@ -12,7 +12,7 @@ $Action = New-ScheduledTaskAction -Execute 'powershell.exe' `
 
 # Due orari al giorno. Per uno solo, lascia solo $T1 e togli ", $T2".
 $T1 = New-ScheduledTaskTrigger -Daily -At 12:30
-$T2 = New-ScheduledTaskTrigger -Daily -At 17:00
+$T2 = New-ScheduledTaskTrigger -Daily -At 16:50
 
 # Esecuzione INTERATTIVA nella sessione dell'utente loggato: indispensabile per il pop-up.
 # Se alcuni file non venissero copiati per permessi, cambia -RunLevel in Highest.

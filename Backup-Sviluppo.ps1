@@ -134,6 +134,42 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
     $SnapDir = Join-Path $DayDir     $now.ToString('HH-mm-ss')
     $null = Assert-BackupRemovalPath $SnapDir
     Clear-BackupResidues
+
+    # --- Guardia 4: c'e' spazio per il nuovo snapshot? -------------------
+    # Dopo Clear-BackupResidues, che puo' aver liberato residui, e prima di
+    # creare qualsiasi cartella: se lo spazio non basta il disco resta
+    # esattamente com'era. Riempire il volume non produce solo un backup
+    # fallito, produce uno stallo: a 0 byte liberi non si scrive piu' nemmeno
+    # il registro delle pulizie, e la cancellazione che libererebbe spazio non
+    # parte (2026-10-16). Un exFAT saturo per giunta si corrompe.
+    $space = Test-BackupFreeSpace
+    if (-not $space.Ok) {
+        $reason = $space.Reason
+        # Il blocco deve dire anche COSA togliere, altrimenti e' un vicolo cieco.
+        # Caso tipico: non esiste nessuna copia completa, quindi Clear-BackupResidues
+        # ha conservato uno snapshot difettoso (giustamente: meglio parziale che
+        # niente) che pero' occupa lo spazio necessario a farne uno buono. La
+        # scelta se sacrificarlo resta all'operatore, che qui riceve i numeri.
+        $broken = @(Get-Snapshots | Where-Object { $_.Broken })
+        if ($broken.Count -gt 0) {
+            $recuperabile = [long]0
+            foreach ($b in $broken) {
+                Get-ChildItem -LiteralPath $b.Path -Recurse -File -Force -ErrorAction SilentlyContinue |
+                    ForEach-Object { $recuperabile += $_.Length }
+            }
+            $reason += "`r`nSu disco ci sono {0} snapshot INCOMPLETI che occupano circa {1:N1} GB ({2}). Sono copie troncate: se non esiste una copia completa l'engine le conserva per prudenza, ma eliminandole si libera lo spazio per una copia buona." -f `
+                       $broken.Count, ($recuperabile/1GB), (($broken | ForEach-Object { $_.Rel }) -join ', ')
+        }
+        Write-Step "BLOCCATO: $reason"
+        Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
+            '{0} | BLOCCATO | spazio insufficiente: liberi {1:N1} GB, servono {2:N1} GB' -f `
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), ($space.FreeBytes/1GB), ($space.NeedBytes/1GB))
+        Write-LocalBackupError $reason
+        exit $EXIT_LOW_SPACE
+    }
+    Write-Step ("Spazio verificato: liberi {0:N1} GB, stimati necessari {1:N1} GB." -f `
+                ($space.FreeBytes/1GB), ($space.NeedBytes/1GB))
+
     New-Item -ItemType Directory -Force -Path $DayDir | Out-Null
     New-Item -ItemType Directory -Path $SnapDir | Out-Null
 

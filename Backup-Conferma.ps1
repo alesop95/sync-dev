@@ -10,7 +10,7 @@
 # Se la configurazione non si e' caricata (file bloccato o assente), avvisa ed esci.
 if (-not $ExpectedDriveLetter) {
     $w = New-Object -ComObject WScript.Shell
-    $w.Popup("Configurazione non caricata: Config-sync-dev.ps1 risulta bloccato o assente.`n`nEsegui in PowerShell:`nGet-ChildItem C:\Scripts\sync-dev\*.ps1 | Unblock-File", 0, "Backup Sviluppo - ERRORE", 16 + 4096) | Out-Null
+    $w.Popup("Configurazione non caricata: Config-sync-dev.ps1 risulta bloccato o assente.`n`nEsegui in PowerShell:`nGet-ChildItem '$PSScriptRoot\*.ps1' | Unblock-File", 0, "Backup Sviluppo - ERRORE", 16 + 4096) | Out-Null
     return
 }
 
@@ -57,6 +57,12 @@ switch ($code) {
     }
     106 {
         $wshell.Popup("Un backup e' gia' in corso. Attendi il suo esito prima di richiedere la rimozione sicura del disco.", 15, "Backup Sviluppo", 48 + 4096)
+    }
+    107 {
+        # Spazio insufficiente: il disco non e' stato toccato. Si blocca PRIMA di
+        # scrivere perche' un volume portato a saturazione non si limita a far
+        # fallire la copia: impedisce anche la pulizia che libererebbe spazio.
+        $wshell.Popup("Spazio insufficiente sul disco di backup ${ExpectedDriveLetter}:.`nBackup BLOCCATO: non e' stato scritto nulla e le copie precedenti sono intatte.`n`nLibera spazio su ${ExpectedDriveLetter}: e rilancia.`n`nDettagli: $PSScriptRoot\_logs\BACKUP-ERRORE.txt", 0, "Backup Sviluppo - SPAZIO INSUFFICIENTE", 48 + 4096)
     }
     default {
         # Codice >= 8 = copia con file mancanti: l'engine ha eliminato lo snapshot

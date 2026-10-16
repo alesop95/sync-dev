@@ -5,7 +5,8 @@
     Avviato all'avvio del sistema dal task "Backup Sviluppo - Watcher J".
 #>
 
-$BackupScript = 'C:\Scripts\sync-dev\Backup-Sviluppo.ps1'
+# Percorso derivato dalla cartella dello script: spostare il progetto non rompe il watcher.
+$BackupScript = Join-Path $PSScriptRoot 'Backup-Sviluppo.ps1'
 $WatchDrive   = 'J:'
 
 function Start-Backup {
@@ -20,11 +21,13 @@ if (Test-Path -LiteralPath "$WatchDrive\") { Start-Backup }
 # EventType 2 = arrivo di un dispositivo (Win32_VolumeChangeEvent).
 $query = "SELECT * FROM Win32_VolumeChangeEvent WHERE EventType = 2"
 
-Register-CimIndicationEvent -Query $query -SourceIdentifier 'JArrival' -Action {
+# Il blocco -Action gira in un contesto separato e NON vede le variabili di questo
+# script: il percorso gli arriva con -MessageData, non riscritto a mano.
+Register-CimIndicationEvent -Query $query -SourceIdentifier 'JArrival' -MessageData $BackupScript -Action {
     $drive = $Event.SourceEventArgs.NewEvent.DriveName   # es. "J:"
     if ($drive -eq 'J:') {
         Start-Process -FilePath 'powershell.exe' `
-            -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','C:\Scripts\sync-dev\Backup-Sviluppo.ps1') `
+            -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File', $Event.MessageData) `
             -WindowStyle Hidden
     }
 } | Out-Null

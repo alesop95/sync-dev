@@ -88,6 +88,74 @@ try {
     Remove-TreeFast $failedSnapshot
     Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Pulizia pendente ripresa e verificata'
 
+    # ===== Guardia sullo spazio libero ==============================
+    # Lo storico e' scritto nella cultura italiana: '.' per le migliaia, ','
+    # per i decimali. Una lettura sbagliata qui falserebbe la stima.
+    $logDirTest = Join-Path $BackupRoot '_logs'
+    New-Item -ItemType Directory -Path $logDirTest -Force | Out-Null
+    $historyTest = Join-Path $logDirTest 'storico-snapshot.txt'
+    Assert-True ((Get-LastSnapshotBytes) -eq 0) 'Storico assente: snapshot non stimabile'
+    Set-Content -LiteralPath $historyTest -Encoding UTF8 -Value @(
+        '2026-10-15 12:31:10 | 2026-10-15\12-31-10 | OK | 204241 file | 13749,1 MB'
+        '2026-10-15 17:00:10 | 2026-10-15\17-00-10 | OK | 205298 file | 26168,3 MB'
+        '2026-10-16 12:30:06 | 2026-10-16\12-30-06 | ERRORI (codice 11) -> vedi x.log | 195523 file | 26688,9 MB'
+    )
+    $lastBytes = Get-LastSnapshotBytes
+    Assert-True ([math]::Abs($lastBytes - (26168.3 * 1MB)) -lt 1MB) 'Ultimo snapshot OK letto dallo storico, decimali italiani comp' + 'resi'
+    Assert-True ($lastBytes -lt (26688.9 * 1MB)) 'Le righe con ERRORI non vengono usate per la stima'
+
+    $SpaceSafetyFactor = 2.0
+    $MinFreeMarginGB   = 5
+    $script:freeBytes  = [long](60 * 1GB)
+    $script:freeThrows = $false
+    function Get-BackupFreeSpace {
+        if ($script:freeThrows) { throw 'Volume non interrogabile' }
+        return $script:freeBytes
+    }
+    # Servono 26168,3 MB x 2 + 5 GB = circa 56,1 GB.
+    Assert-True (Test-BackupFreeSpace).Ok 'Spazio sufficiente: copia ammessa'
+    $script:freeBytes = [long](50 * 1GB)
+    $lowSpace = Test-BackupFreeSpace
+    Assert-True (-not $lowSpace.Ok) 'Spazio insufficiente: copia bloccata'
+    Assert-True ($lowSpace.NeedBytes -gt $lowSpace.FreeBytes) 'Il blocco riporta quanto serve e quanto c''e'''
+    $script:freeBytes = [long]0
+    Assert-True (-not (Test-BackupFreeSpace).Ok) 'Disco a zero byte: copia bloccata prima di scrivere'
+    $script:freeThrows = $true
+    Assert-True (-not (Test-BackupFreeSpace).Ok) 'Spazio non verificabile: copia bloccata'
+    $script:freeThrows = $false
+    Remove-Item -LiteralPath 'Function:\Get-BackupFreeSpace'
+    Remove-Item -LiteralPath $historyTest -Force
+
+    # ===== Registro delle pulizie con destinazione satura ===========
+    # Il 2026-10-16 il disco pieno impediva di scrivere il record del registro,
+    # e senza record la cancellazione che avrebbe liberato spazio non partiva.
+    # Lo specchio locale esiste per rompere quello stallo.
+    $LocalJournalBase = Join-Path $testRoot 'giornale-locale'
+    $fullDiskSnapshot = Join-Path $BackupRoot '2026-02-01\09-00-00'
+    New-Item -ItemType Directory -Path $fullDiskSnapshot -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $fullDiskSnapshot 'dati.txt') -Value 'da eliminare'
+    $script:failDestWrites = $true
+    function Set-Content {
+        param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)
+        if ($script:failDestWrites -and $LiteralPath.StartsWith($BackupRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Spazio su disco insufficiente.'
+        }
+        Microsoft.PowerShell.Management\Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8
+    }
+    try {
+        Update-CleanupJournal $fullDiskSnapshot $true
+        Assert-True (@(Get-PendingCleanup) -contains '2026-02-01\09-00-00') 'Destinazione satura: la pulizia resta memorizzata nello specchio locale'
+        Assert-True (Test-Path -LiteralPath (Join-Path (Get-LocalCleanupJournalPath) '2026-02-01_09-00-00.txt')) 'Record scritto nel registro locale'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path (Get-CleanupJournalPath) '2026-02-01_09-00-00.txt'))) 'Nessun record sulla destinazione satura'
+    } finally {
+        $script:failDestWrites = $false
+        Remove-Item -LiteralPath 'Function:\Set-Content'
+    }
+    Remove-TreeFast $fullDiskSnapshot
+    Assert-True (-not (Test-Path -LiteralPath $fullDiskSnapshot)) 'Pulizia eseguita malgrado il registro fosse finito in locale'
+    Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Chiusura della pulizia ripulisce anche lo specchio locale'
+    $LocalJournalBase = $null
+
     # Esegue l'engine vero in processi separati: i mock stanno solo nella copia
     # temporanea della configurazione locale, mai nel progetto installato.
     function New-EngineFixture([string]$Name, [bool]$Residues) {
@@ -134,6 +202,8 @@ function Get-Volume {
         HealthStatus = $(if ($bad) { 'Warning' } else { 'Healthy' })
         OperationalStatus = @($(if ($bad) { 'Full Repair Needed' } else { 'OK' }))
         FileSystemType = 'exFAT'
+        # Lo scenario 'low-space' simula il disco saturo del 2026-10-16.
+        SizeRemaining = $(if ($script:scenario -eq 'low-space') { [long]0 } else { [long](500 * 1GB) })
     }
 }
 function robocopy {
@@ -195,6 +265,16 @@ if ($script:scenario -eq 'stats-failure') {
     Assert-True ((Invoke-EngineFixture $fixture 'copy-failure') -eq 8) 'Engine: copia fallita senza backup completi restituisce 8'
     Assert-True (Test-Path -LiteralPath (Join-Path $fixture.Previous 'previous.txt')) 'Engine: unica copia parziale precedente conservata'
     Assert-True (@(Get-ChildItem -LiteralPath $fixture.Backups -Filter '_SNAPSHOT-INCOMPLETO.txt' -Recurse -Force).Count -eq 2) 'Engine: nessuna copia parziale eliminata quando mancano copie complete'
+
+    # Disco saturo: il backup deve fermarsi PRIMA di scrivere, lasciando intatta
+    # la copia precedente. E' lo scenario del 2026-10-16, dove invece la copia
+    # parti', riempi' il volume e bloccò pure la pulizia.
+    $fixture = New-EngineFixture 'low-space' $false
+    $before = @(Get-ChildItem -LiteralPath $fixture.Backups -Directory -Force | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' }).Count
+    Assert-True ((Invoke-EngineFixture $fixture 'low-space') -eq 107) 'Engine: disco saturo restituisce EXIT_LOW_SPACE'
+    Assert-True (Test-Path -LiteralPath (Join-Path $fixture.Previous 'previous.txt')) 'Engine: disco saturo conserva l''ultimo backup completo'
+    $after = @(Get-ChildItem -LiteralPath $fixture.Backups -Directory -Force | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' }).Count
+    Assert-True ($after -eq $before) 'Engine: disco saturo non crea nessuna cartella-giorno nuova'
 
     $fixture = New-EngineFixture 'invalid-journal' $false
     $invalidJournal = Join-Path $fixture.Backups '_logs\_pulizie-pendenti'

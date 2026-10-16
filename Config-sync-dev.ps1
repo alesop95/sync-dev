@@ -39,8 +39,23 @@ $ExcludeDirs = @(
     # Corpus statico ~288k file (.md) / ~4 GB: troppo pesante per snapshot completi
     # ripetuti (faceva sforare il limite di 3 ore del task). Percorso ASSOLUTO cosi'
     # esclude SOLO questo, non altre cartelle chiamate 'data'. Va salvato a parte.
-    'E:\legal-consultant\data'
-    # '.git'   # escludi SOLO se ogni repo e' gia' su un remoto
+    'E:\legal-consultant\data',
+    # Cloni di repository di terze parti (pokeemerald e simili) tenuti come fonte di
+    # consultazione: 49.604 file per appena 0,20 GB di contenuto reale, che su exFAT con
+    # cluster da 128 KB diventano 6,13 GB. Il 97% e' spazio sprecato in slack e il
+    # contenuto si ricrea con un 'git clone' dall'upstream. Percorso ASSOLUTO per non
+    # toccare altre cartelle chiamate 'cloni'. Aggiunto il 2026-10-16.
+    'E:\retrogame-mod-pok-dev\_notes\fonti\cloni',
+    # Log locali di sync-dev. Da quando il progetto vive su E:\ sta DENTRO la propria
+    # sorgente, e l'engine scrive qui (BACKUP-ERRORE.txt) proprio mentre robocopy sta
+    # copiando questa cartella: un file che nasce o cambia a copia in corso chiude il
+    # backup con ERRORE 2, lo stesso incidente gia' visto con COMMIT-MSG*.txt. Gli
+    # script restano inclusi nello snapshot, solo i log no. Aggiunto il 2026-10-16.
+    'E:\sync-dev\_logs'
+    # '.git'   # NON escludere: verifica del 2026-10-16 su 41 repo di E:\ -> 'my-wedding-day'
+    #          # ha 16 commit non pushati e 'serp.systems-full-early_mvp' non ha alcun
+    #          # remoto, quindi la sua storia esiste solo qui. Escludere .git li
+    #          # perderebbe in silenzio. Costo attuale: 5,00 GB su exFAT per 0,92 GB logici.
 )
 # Backup di macchina Veeam Agent (full .vbk, incrementale .vib, metadati .vbm, secondo
 # la guida "Types of Backup Files" di Veeam Agent for Linux): un punto di ripristino e'
@@ -55,6 +70,40 @@ $ExcludeDirs = @(
 # (senza estensione), che vanno salvati. Aggiunto il 2026-10-05.
 $ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store','*.vbk','*.vib','*.vbm','COMMIT-MSG*.txt')
 
+# ===== Guardia sullo spazio libero ==================================
+# Il 2026-10-16 il disco e' arrivato a 0 byte liberi durante la copia. Il danno
+# non e' stato il backup fallito, ma il blocco che ne e' seguito: con il volume
+# saturo l'engine non riusciva piu' a scrivere nemmeno il record da poche
+# centinaia di byte del registro delle pulizie, e senza quel record la
+# cancellazione che avrebbe liberato spazio non partiva. Disco pieno ->
+# pulizia impossibile -> disco pieno: da li' non si esce da soli, e un exFAT
+# tenuto a saturazione si corrompe (su J: sono comparse FOUND.000/001/002).
+# Questa guardia misura PRIMA di scrivere e, se lo spazio non basta, blocca il
+# backup lasciando il disco esattamente com'era.
+
+# Moltiplicatore applicato alla dimensione LOGICA dell'ultimo snapshot riuscito
+# (letta dallo storico) per stimare quanto occupera' davvero il prossimo.
+# Serve perche' su un file system a cluster grandi l'occupazione reale e' molto
+# maggiore di quella logica: il costo non dipende dai byte ma dal NUMERO di file,
+# perche' ognuno consuma un cluster intero anche se contiene 80 byte.
+#
+# Misure su J: (exFAT, cluster 128 KB):
+#   2026-10-15  25,55 GB logici -> 47,28 reali = 1,85x  (205.298 file)
+#   2026-10-16  26,06 GB logici -> 46,57 reali = 1,79x  (195.524 file)
+#   2026-10-16  25,92 GB logici -> 41,93 reali = 1,62x  (157.846 file, cloni esclusi)
+#
+# Il rapporto scende man mano che si escludono le cartelle a molti file minuscoli,
+# perche' e' la media della dimensione dei file a guidarlo. 1.8 copre il caso
+# peggiore misurato con un margine, senza bloccare copie che ci starebbero: una
+# stima troppo prudente non protegge niente, fa solo saltare il backup. Se si
+# cambia l'elenco delle esclusioni conviene ricontrollare questo valore.
+# Su una destinazione NTFS con cluster da 4 KB basta 1.15.
+$SpaceSafetyFactor = 1.8
+
+# Margine assoluto preteso oltre alla stima, in GB. Copre i log, il registro
+# delle pulizie e il fatto che lo snapshot vecchio viene eliminato DOPO la copia.
+$MinFreeMarginGB = 5
+
 # Codici di uscita per comunicare l'esito al chiamante
 $EXIT_OK              = 0
 $EXIT_DEVICE_MISMATCH = 101    # disco con la lettera attesa ma NON e' il dispositivo atteso
@@ -63,6 +112,7 @@ $EXIT_DEVICE_MISSING  = 103    # nessun disco con la lettera attesa
 $EXIT_VOLUME_UNHEALTHY = 104   # volume degradato o stato non verificabile
 $EXIT_IO_FAILURE       = 105   # conteggio, log o pulizia non conclusi
 $EXIT_ALREADY_RUNNING  = 106   # backup gia' in corso, nessuna nuova copia
+$EXIT_LOW_SPACE        = 107   # spazio libero insufficiente: niente viene scritto
 
 # ===== Funzioni =====================================================
 

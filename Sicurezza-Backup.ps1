@@ -23,6 +23,65 @@ function Test-BackupVolume {
     return $result
 }
 
+function Get-BackupFreeSpace {
+    # Byte liberi sul volume di backup. Funzione a se' stante perche' i test la
+    # sostituiscono per simulare un disco pieno senza saturarne uno vero.
+    $volumes = @(Get-Volume -DriveLetter $ExpectedDriveLetter -ErrorAction Stop)
+    if ($volumes.Count -ne 1) { throw 'Volume non identificabile in modo univoco.' }
+    return [long]$volumes[0].SizeRemaining
+}
+
+function Get-LastSnapshotBytes {
+    # Dimensione LOGICA dell'ultimo snapshot riuscito, letta dallo storico.
+    # Si preferisce lo storico a una scansione del disco perche' non costa I/O
+    # sul volume esterno e segue da se' la crescita della sorgente.
+    # 0 = non stimabile (storico assente o senza righe OK).
+    $history = Join-Path (Join-Path $BackupRoot '_logs') 'storico-snapshot.txt'
+    if (-not (Test-Path -LiteralPath $history -ErrorAction SilentlyContinue)) { return [long]0 }
+    $lines = @(Get-Content -LiteralPath $history -Encoding UTF8 -ErrorAction SilentlyContinue |
+               Where-Object { $_ -match '\|\s*OK\s*\|' -and $_ -match '([\d.,]+)\s*MB\s*$' })
+    if ($lines.Count -eq 0) { return [long]0 }
+    if ($lines[-1] -match '([\d.,]+)\s*MB\s*$') {
+        # Lo storico e' scritto nella cultura italiana: '.' separa le migliaia,
+        # ',' i decimali. Si normalizza prima di convertire.
+        $n = ($Matches[1] -replace '\.', '') -replace ',', '.'
+        try { return [long]([double]::Parse($n, [Globalization.CultureInfo]::InvariantCulture) * 1MB) }
+        catch { return [long]0 }
+    }
+    return [long]0
+}
+
+function Test-BackupFreeSpace {
+    # Guardia pre-volo: stima quanto occupera' il prossimo snapshot e lo confronta
+    # con lo spazio libero PRIMA che venga scritto un solo byte. Se non basta, il
+    # backup si ferma e il disco resta esattamente com'era.
+    $r = [pscustomobject]@{ Ok = $false; Reason = ''; FreeBytes = [long]0; NeedBytes = [long]0 }
+    try { $r.FreeBytes = Get-BackupFreeSpace }
+    catch {
+        $r.Reason = "Spazio libero su ${ExpectedDriveLetter}: non verificabile: $($_.Exception.Message) Copia bloccata."
+        return $r
+    }
+    $factor = if ($SpaceSafetyFactor -gt 0) { [double]$SpaceSafetyFactor } else { 2.0 }
+    $margin = [long](([double]$MinFreeMarginGB) * 1GB)
+    $last   = Get-LastSnapshotBytes
+    # Senza storico non si puo' stimare lo snapshot: si pretende almeno il margine,
+    # cosi' la prima esecuzione non parte comunque su un disco gia' saturo.
+    $r.NeedBytes = if ($last -gt 0) { [long]($last * $factor) + $margin } else { $margin }
+    if ($r.FreeBytes -lt $r.NeedBytes) {
+        $stima = if ($last -gt 0) {
+            'stima {0:N1} GB (ultimo snapshot {1:N1} GB x {2}) piu'' {3:N0} GB di margine' -f `
+                ($r.NeedBytes/1GB), ($last/1GB), $factor, ([double]$MinFreeMarginGB)
+        } else {
+            'nessuno storico per stimare lo snapshot: preteso il solo margine di {0:N0} GB' -f ([double]$MinFreeMarginGB)
+        }
+        $r.Reason = "Spazio insufficiente su ${ExpectedDriveLetter}: liberi {0:N1} GB, servono {1:N1} GB ($stima). Copia BLOCCATA: non e' stato scritto nulla. Libera spazio sul disco di backup, poi rilancia." -f `
+                    ($r.FreeBytes/1GB), ($r.NeedBytes/1GB)
+        return $r
+    }
+    $r.Ok = $true
+    return $r
+}
+
 function Assert-BackupRoot {
     if ($ExpectedDriveLetter -notmatch '^[A-Za-z]$' -or $BackupRoot -notmatch '^[A-Za-z]:\\') {
         throw 'Lettera o radice di backup non valida: occorre un percorso locale assoluto.'
@@ -95,23 +154,43 @@ function Get-CleanupJournalPath {
     return $journal
 }
 
-function Get-PendingCleanup {
-    $journal = Get-CleanupJournalPath
-    if (Test-Path -LiteralPath $journal -ErrorAction Stop) {
-        foreach ($record in @(Get-ChildItem -LiteralPath $journal -File -Force -ErrorAction Stop)) {
-            $lines = @(Get-Content -LiteralPath $record.FullName -Encoding UTF8 -ErrorAction Stop)
-            if ($lines.Count -ne 1 -or ($record.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                throw 'Un record della pulizia e'' illeggibile o non valido.'
-            }
-            $relative = $lines[0].Trim()
-            if ($relative -notmatch '^\d{4}-\d{2}-\d{2}(\\\d{2}-\d{2}-\d{2})?$' -or
-                $record.Name -ine (($relative -replace '\\', '_') + '.txt')) {
-                throw 'Il registro delle pulizie pendenti contiene un percorso non valido.'
-            }
-            $null = Assert-BackupRemovalPath (Join-Path $BackupRoot $relative)
-            $relative
+function Get-LocalCleanupJournalPath {
+    # Specchio LOCALE del registro, accanto agli script invece che sul disco di
+    # backup. Esiste per un motivo solo: quando la destinazione e' satura non ci
+    # entra piu' nemmeno il record da poche centinaia di byte che tiene memoria
+    # della cancellazione in corso, e senza quel record la pulizia che
+    # libererebbe spazio non parte. Il 2026-10-16 e' finita cosi', con il disco
+    # pieno e l'engine incapace di liberarlo. Qui lo spazio c'e' sempre.
+    # $LocalJournalBase e' sovrascrivibile dai test per non sporcare il progetto.
+    $base = if ($LocalJournalBase) { $LocalJournalBase } else { Join-Path $PSScriptRoot '_logs' }
+    return (Join-Path $base '_pulizie-pendenti')
+}
+
+function Read-CleanupJournal([string]$Journal) {
+    # Legge e convalida i record di un singolo registro. Le regole sono le stesse
+    # per quello sul disco di backup e per lo specchio locale.
+    if (-not (Test-Path -LiteralPath $Journal -ErrorAction SilentlyContinue)) { return }
+    foreach ($record in @(Get-ChildItem -LiteralPath $Journal -File -Force -ErrorAction Stop)) {
+        $lines = @(Get-Content -LiteralPath $record.FullName -Encoding UTF8 -ErrorAction Stop)
+        if ($lines.Count -ne 1 -or ($record.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Un record della pulizia e'' illeggibile o non valido.'
         }
+        $relative = $lines[0].Trim()
+        if ($relative -notmatch '^\d{4}-\d{2}-\d{2}(\\\d{2}-\d{2}-\d{2})?$' -or
+            $record.Name -ine (($relative -replace '\\', '_') + '.txt')) {
+            throw 'Il registro delle pulizie pendenti contiene un percorso non valido.'
+        }
+        $null = Assert-BackupRemovalPath (Join-Path $BackupRoot $relative)
+        $relative
     }
+}
+
+function Get-PendingCleanup {
+    # Unione dei due registri, senza duplicati: una pulizia e' pendente se
+    # risulta tale in almeno uno dei due.
+    @(@(Read-CleanupJournal (Get-CleanupJournalPath)) +
+      @(Read-CleanupJournal (Get-LocalCleanupJournalPath))) |
+        Select-Object -Unique
 }
 
 function Update-CleanupJournal([string]$Path, [bool]$Pending) {
@@ -120,18 +199,36 @@ function Update-CleanupJournal([string]$Path, [bool]$Pending) {
     $relative = $resolved.Substring($root.Length + 1)
     $entries = @(Get-PendingCleanup)
     $journal = Get-CleanupJournalPath
-    $record = Join-Path $journal (($relative -replace '\\', '_') + '.txt')
+    $name   = ($relative -replace '\\', '_') + '.txt'
+    $record = Join-Path $journal $name
     if ($Pending) {
         # Un file per operazione: aggiornare un record non riscrive gli altri.
         # Se esiste gia', non si tronca neppure il record dell'operazione ripresa.
         if ($entries -notcontains $relative) {
-            New-Item -ItemType Directory -Path $journal -Force -ErrorAction Stop | Out-Null
-            Set-Content -LiteralPath $record -Value $relative -Encoding UTF8 -ErrorAction Stop
+            try {
+                New-Item -ItemType Directory -Path $journal -Force -ErrorAction Stop | Out-Null
+                Set-Content -LiteralPath $record -Value $relative -Encoding UTF8 -ErrorAction Stop
+            } catch {
+                # Destinazione piena o non scrivibile: la memoria va in locale, cosi'
+                # la cancellazione puo' comunque partire e liberare spazio. Se anche
+                # questa fallisce l'eccezione sale, ed e' giusto: senza memoria del
+                # residuo non si cancella niente.
+                $localJournal = Get-LocalCleanupJournalPath
+                New-Item -ItemType Directory -Path $localJournal -Force -ErrorAction Stop | Out-Null
+                Set-Content -LiteralPath (Join-Path $localJournal $name) -Value $relative -Encoding UTF8 -ErrorAction Stop
+            }
         }
-    } elseif (Test-Path -LiteralPath $record -ErrorAction Stop) {
-        Remove-Item -LiteralPath $record -Force -ErrorAction Stop
-        if (@(Get-ChildItem -LiteralPath $journal -Force -ErrorAction Stop).Count -eq 0) {
-            [IO.Directory]::Delete($journal, $false)
+    } else {
+        # Chiusura: il record va tolto da ENTRAMBI i registri, perche' non si sa
+        # quale dei due lo aveva accolto.
+        foreach ($j in @($journal, (Get-LocalCleanupJournalPath))) {
+            $r = Join-Path $j $name
+            if (Test-Path -LiteralPath $r -ErrorAction SilentlyContinue) {
+                Remove-Item -LiteralPath $r -Force -ErrorAction Stop
+                if (@(Get-ChildItem -LiteralPath $j -Force -ErrorAction Stop).Count -eq 0) {
+                    [IO.Directory]::Delete($j, $false)
+                }
+            }
         }
     }
 }

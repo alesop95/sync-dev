@@ -16,6 +16,10 @@ Caratteristiche principali:
   viene mostrato un alert; la sorgente puo' essere riconfigurata in un punto solo.
 - Verifica del volume prima delle scritture e dopo la copia: serve lo stato
   `Healthy / OK`. Un volume degradato o non verificabile blocca copia e pulizia.
+- Verifica dello spazio libero prima di scrivere: se il disco non ha spazio per
+  il nuovo snapshot la copia si blocca con codice 107 e il disco resta com'era.
+  Serve a non saturare il volume, perche' un disco pieno non fa solo fallire la
+  copia: impedisce pure la pulizia che libererebbe spazio (sezione 7).
 - Pulizia verificata e ripresa dei residui: le cancellazioni iniziate restano
   registrate fuori dall'albero eliminato finche' la rimozione non e' confermata.
   Gli errori di I/O o retention impediscono di dichiarare riuscita l'esecuzione.
@@ -67,7 +71,7 @@ Valori predefiniti (modificabili, vedi sezione 3):
 - Sorgente: `E:\`
 - Disco di backup: lettera `J`, modello `*Samsung*T7*`
 - Radice degli snapshot: `J:\backup-sviluppo`
-- Cartella degli script: `C:\Scripts\sync-dev`
+- Cartella degli script: `E:\sync-dev`
 
 ## 2. Contenuto del repository
 
@@ -90,7 +94,7 @@ File della modalita' automatica alternativa (non attivi, vedi sezione 15):
 | `Registra-Task.ps1` | Registra i task automatici (orari + watcher) |
 | `Watcher-Backup.ps1` | Avvia la copia al collegamento del disco di backup |
 
-Tutti gli script devono risiedere nella stessa cartella (`C:\Scripts\sync-dev`),
+Tutti gli script devono risiedere nella stessa cartella (`E:\sync-dev`),
 perche' si caricano a vicenda tramite percorso relativo allo script.
 
 ## 3. Configurazione
@@ -108,8 +112,10 @@ dot-source dagli altri script.
 | `$BackupRoot` | `J:\backup-sviluppo` | Radice degli snapshot (derivata dalla lettera) |
 | `$RetainDays` | `1` | Giorni solari conservati, oggi incluso: 1 = resta solo il giorno corrente (minimo effettivo 1) |
 | `$RetainSnapshots` | `1` | Snapshot completi conservati in totale, i piu' recenti: 1 = resta solo l'ultima copia, quella del pomeriggio sostituisce quella del mattino (minimo effettivo 1) |
-| `$ExcludeDirs` | vedi file | Cartelle escluse dalla copia (per nome, a ogni profondita') |
+| `$ExcludeDirs` | vedi file | Cartelle escluse dalla copia (per nome, a ogni profondita', oppure per percorso assoluto) |
 | `$ExcludeFiles` | vedi file | Pattern di file esclusi |
+| `$SpaceSafetyFactor` | `1.8` | Moltiplicatore sulla dimensione logica dell'ultimo snapshot per stimare quella reale. `1.8` su exFAT con cluster da 128 KB (misurato fra 1,62x e 1,85x), `1.15` basta su NTFS con cluster da 4 KB |
+| `$MinFreeMarginGB` | `5` | Margine libero preteso oltre alla stima, in GB |
 
 Per cambiare modello di SSD in futuro, basta aggiornare `$ExpectedDiskModel` ed
 eventualmente `$ExpectedDiskSerial`. Per cambiare sorgente, basta aggiornare
@@ -138,6 +144,27 @@ file in elenco ma non piu' su disco e chiudeva con `ERRORE 2 (0x00000002)`. Il
 loro contenuto resta comunque nella history git. Il suffisso `.txt` evita di
 escludere gli hook git `commit-msg`, che non hanno estensione.
 
+### Esclusioni aggiunte il 2026-10-16
+
+`E:\retrogame-mod-pok-dev\_notes\fonti\cloni` — cloni di repository di terze
+parti (pokeemerald e simili) tenuti come fonte di consultazione: 49.604 file per
+appena 0,20 GB di contenuto, che su exFAT con cluster da 128 KB diventano 6,13
+GB. Il 97% e' slack, e il contenuto si ricrea con un `git clone`.
+
+`E:\sync-dev\_logs` — da quando il progetto vive su `E:\` sta dentro la propria
+sorgente, e l'engine scrive qui mentre robocopy sta copiando questa cartella: un
+file che nasce o cambia a copia in corso e' lo stesso incidente gia' visto con
+`COMMIT-MSG*.txt`. Gli script restano nello snapshot, solo i log no.
+
+### Perche' `.git` resta incluso
+
+Una verifica del 2026-10-16 sui 41 repository di `E:\` ha trovato due casi che
+rendono l'esclusione inaccettabile: `my-wedding-day` ha 16 commit non pushati e
+`serp.systems-full-early_mvp` non ha alcun remoto, quindi la sua storia esiste
+solo su questo disco. Escludere `.git` li perderebbe in silenzio. Il costo
+attuale e' 5,00 GB su exFAT per 0,92 GB logici, su 34.544 file. L'esclusione
+torna valutabile solo dopo aver dato un remoto a ogni repository.
+
 ## 4. Verifica dell'identita' del disco di backup
 
 Prima di ogni copia, l'engine controlla che la lettera attesa esista e punti
@@ -156,7 +183,7 @@ impostare anche `$ExpectedDiskSerial`. Per scoprire modello e serial esatti del
 proprio dispositivo, eseguire:
 
 ```powershell
-C:\Scripts\sync-dev\Mostra-Dischi.ps1
+E:\sync-dev\Mostra-Dischi.ps1
 ```
 
 Copiare il valore della colonna Modello in `$ExpectedDiskModel` (con eventuali
@@ -172,7 +199,7 @@ basta impostarla una volta. Due modalita':
 Automatica (parametrica), con il disco collegato e PowerShell come Amministratore:
 
 ```powershell
-C:\Scripts\sync-dev\Imposta-LetteraJ.ps1
+E:\sync-dev\Imposta-LetteraJ.ps1
 ```
 
 Lo script individua il disco atteso, assegna la lettera attesa alla sua
@@ -191,13 +218,13 @@ Sequenza cronologica completa, da eseguire in ordine. Lo sblocco dei file (passo
 3) e' parte integrante della sequenza, non un dettaglio: senza di esso gli script
 vengono bloccati dai criteri di esecuzione.
 
-1. Copiare tutti gli script nella cartella `C:\Scripts\sync-dev`.
+1. Copiare tutti gli script nella cartella `E:\sync-dev`.
 2. Aprire PowerShell come Amministratore (con il proprio account).
 3. Sbloccare i file e abilitare l'esecuzione degli script locali (lo scope
    CurrentUser non richiede privilegi di amministratore):
 
    ```powershell
-   Get-ChildItem C:\Scripts\sync-dev\*.ps1 | Unblock-File
+   Get-ChildItem E:\sync-dev\*.ps1 | Unblock-File
    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
    ```
 
@@ -211,19 +238,19 @@ vengono bloccati dai criteri di esecuzione.
    `Config-sync-dev.ps1`:
 
    ```powershell
-   C:\Scripts\sync-dev\Mostra-Dischi.ps1
+   E:\sync-dev\Mostra-Dischi.ps1
    ```
 
 6. Assegnare la lettera attesa al disco (se non gia' impostata):
 
    ```powershell
-   C:\Scripts\sync-dev\Imposta-LetteraJ.ps1
+   E:\sync-dev\Imposta-LetteraJ.ps1
    ```
 
 7. Registrare il task pianificato:
 
    ```powershell
-   C:\Scripts\sync-dev\Registra-Task-Conferma.ps1
+   E:\sync-dev\Registra-Task-Conferma.ps1
    ```
 
 8. Verificare che il task sia stato creato:
@@ -294,6 +321,51 @@ Prima di ogni scrittura sul disco di backup, `Get-Volume` deve restituire
 o se il controllo non riesce, l'engine si ferma con codice 104 e lascia il
 dettaglio in `_logs\BACKUP-ERRORE.txt` accanto agli script, sul disco locale.
 Il controllo viene ripetuto dopo il conteggio e prima di ogni cancellazione.
+
+### Guardia sullo spazio libero (codice 107)
+
+Dopo il recupero dei residui e prima di creare qualsiasi cartella, l'engine
+stima quanto occupera' il nuovo snapshot e lo confronta con lo spazio libero.
+Se non basta, si ferma con codice 107 e il disco resta esattamente com'era.
+
+La stima e' `dimensione logica dell'ultimo snapshot riuscito` (letta da
+`storico-snapshot.txt`, quindi senza costi di scansione) moltiplicata per
+`$SpaceSafetyFactor`, piu' `$MinFreeMarginGB`. Il moltiplicatore serve perche'
+su un file system a cluster grandi l'occupazione reale supera di molto quella
+logica: il costo non dipende dai byte ma dal numero di file, visto che ognuno
+consuma un cluster intero anche se contiene 80 byte. Misure su `J:`:
+
+| Snapshot | Logico | Reale | Rapporto | File |
+|----------|--------|-------|----------|------|
+| 2026-10-15 | 25,55 GB | 47,28 GB | 1,85x | 205.298 |
+| 2026-10-16 | 26,06 GB | 46,57 GB | 1,79x | 195.524 |
+| 2026-10-16 (cloni esclusi) | 25,92 GB | 41,93 GB | 1,62x | 157.846 |
+
+Il rapporto scende man mano che si escludono le cartelle a molti file minuscoli.
+Conviene quindi ricontrollare `$SpaceSafetyFactor` quando si cambiano le
+esclusioni: un valore troppo prudente non protegge niente, fa solo saltare il
+backup. Su una destinazione NTFS con cluster da 4 KB basta `1.15`.
+
+La guardia non esiste per cortesia verso l'utente, ma perche' un volume portato
+a saturazione non si limita a far fallire la copia. Il 2026-10-16 `J:` e'
+arrivato a 0 byte liberi durante robocopy; alla pulizia successiva l'engine non
+e' riuscito a scrivere nemmeno il record da poche centinaia di byte del registro
+delle pulizie, e senza quel record la cancellazione che avrebbe liberato spazio
+non e' partita. Disco pieno, pulizia impossibile, disco pieno: da li' non si
+esce da soli. In piu' un exFAT tenuto a saturazione si corrompe, e su `J:` sono
+comparse le cartelle di recupero `FOUND.000`, `FOUND.001` e `FOUND.002`.
+
+Quando il blocco scatta, il messaggio elenca anche gli snapshot incompleti
+presenti e quanto spazio libererebbero: senza quell'indicazione il codice 107
+sarebbe un vicolo cieco nel caso peggiore, cioe' quando non esiste nessuna copia
+completa, l'engine conserva per prudenza una copia troncata ed e' proprio quella
+a occupare lo spazio che servirebbe per farne una buona. La decisione se
+sacrificarla resta all'operatore.
+
+Lo stesso incidente ha lasciato una seconda difesa: se il registro delle pulizie
+non e' scrivibile sulla destinazione, il record finisce in uno specchio locale
+accanto agli script (`_logs\_pulizie-pendenti`), cosi' la cancellazione puo'
+comunque partire. `Get-PendingCleanup` legge l'unione dei due registri.
 L'engine non avvia riparazioni del volume.
 
 ## 8. Struttura su disco
@@ -477,7 +549,7 @@ la pulizia e viene comunicato solo con codice 0 e il messaggio finale.
 Regressioni automatiche, senza avviare un backup reale:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\Scripts\sync-dev\Test-Sicurezza.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File E:\sync-dev\Test-Sicurezza.ps1
 ```
 
 Il test crea un albero temporaneo isolato e controlla volumi degradati,
@@ -488,7 +560,7 @@ dell'engine usano solo configurazioni locali temporanee e una copia simulata.
 1. Con il disco di backup corretto collegato e con la lettera attesa, eseguire:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File C:\Scripts\sync-dev\Backup-Conferma.ps1
+   powershell -ExecutionPolicy Bypass -File E:\sync-dev\Backup-Conferma.ps1
    ```
 
    Confermare e verificare la creazione di `J:\backup-sviluppo\<data>\<ora>`, di
@@ -578,6 +650,23 @@ Riferimenti Microsoft: [errori storage e corruzione](https://learn.microsoft.com
 - Una copia con file mancanti non viene ritentata subito: l'engine la marca e
   protegge l'ultima copia completa (sezione 9), ma il recupero avviene alla
   successiva esecuzione confermata.
+- Su un file system a cluster grandi lo snapshot occupa molto piu' della sua
+  dimensione logica: su `J:`, exFAT con cluster da 128 KB, 26,1 GB logici ne
+  occupano 46,6 reali. Il costo non dipende dai byte ma dal NUMERO di file, e la
+  sorgente ne ha centinaia di migliaia di minuscoli. Una destinazione NTFS con
+  cluster da 4 KB ridurrebbe lo snapshot di circa 21 GB senza escludere nulla:
+  e' la singola leva piu' efficace, piu' di qualunque esclusione.
+- Il disco di backup non e' dedicato: `J:` ospita anche archivi personali
+  (circa 353 GB su 466), quindi al backup resta una frazione del volume. La
+  guardia sullo spazio protegge dal riempimento, ma non crea spazio.
+- Gli snapshot sono copie piene e indipendenti: su exFAT non esistono hard link,
+  quindi non e' possibile un incrementale in stile Time Machine, dove ogni
+  snapshot costa solo i file cambiati. Richiederebbe una destinazione NTFS.
+- Da quando il progetto risiede in `E:\sync-dev` sta dentro la propria sorgente:
+  si copia da solo negli snapshot (utile, il tool viaggia col backup) ma i suoi
+  log vanno esclusi, perche' vengono scritti a copia in corso. Se `E:` si
+  guastasse si perderebbero insieme i dati e gli script, che pero' restano su
+  GitHub e dentro l'ultimo snapshot.
 - Per protezione contro ransomware o guasti, valutare una terza copia offline
   periodica secondo la regola 3-2-1.
 - Il pop-up appare solo a utente connesso, coerentemente con un disco di backup
@@ -605,6 +694,7 @@ L'engine `Backup-Sviluppo.ps1` comunica l'esito al chiamante con questi codici:
 | 104 | Volume degradato o non verificabile: nessuna copia o pulizia avviata |
 | 105 | Errore di I/O, verifica, log o pulizia: esecuzione non conclusa |
 | 106 | Backup gia' in corso: nessuna nuova copia avviata |
+| 107 | Spazio libero insufficiente: copia bloccata, nessuna scrittura sul disco |
 | 8-16 | Errori riportati da robocopy (vedi log dettagliato) |
 
 ## 17. Controllo di versione e dati sensibili
@@ -632,7 +722,7 @@ di macchina e del repository. L'agente prepara e verifica le modifiche ai file.
 Sequenza per inizializzare il repository:
 
 ```powershell
-cd C:\Scripts\sync-dev
+cd E:\sync-dev
 git init
 git status            # verificare che vengano inclusi solo .ps1, README.md, .gitignore
 git add .

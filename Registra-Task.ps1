@@ -6,7 +6,7 @@
     DA ESEGUIRE UNA SOLA VOLTA, in PowerShell come Amministratore.
 #>
 
-$ScriptDir     = 'C:\Scripts\sync-dev'
+$ScriptDir     = $PSScriptRoot
 $BackupScript  = Join-Path $ScriptDir 'Backup-Sviluppo.ps1'
 $WatcherScript = Join-Path $ScriptDir 'Watcher-Backup.ps1'
 
