@@ -315,6 +315,71 @@ if ($script:scenario -eq 'stats-failure') {
     Assert-True ((Invoke-EngineFixture $fixture 'healthy') -eq 0) 'Engine: rilancio sano recupera la pulizia interrotta'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Backups '_logs\_pulizie-pendenti'))) 'Engine: residui del tentativo precedente eliminati'
 
+    # --- Analisi del log di robocopy e declassamento degli errori benigni ---
+    # Il 2026-10-19 un solo prova.md di scratch, cancellato da un altro processo
+    # mentre la copia era in corso, ha fatto scartare 25,6 GB di copia buona.
+    $logRoot = Join-Path $testRoot 'robolog'
+    New-Item -ItemType Directory -Path $logRoot | Out-Null
+    $spariti = Join-Path $Source 'mai-esistito\effimero.md'
+    $presente = Join-Path $Source 'presente.md'
+    Set-Content -LiteralPath $presente -Value 'x' -Encoding UTF8
+
+    function New-RoboLog([string]$Name, [string[]]$Lines) {
+        $p = Join-Path $logRoot $Name
+        Set-Content -LiteralPath $p -Value $Lines -Encoding Oem
+        return $p
+    }
+    function Test-Declassabile([string]$LogPath) {
+        $errs = @(Get-RobocopyLogErrors $LogPath)
+        if ($errs.Count -eq 0) { return $false }
+        return (@($errs | Where-Object { Test-VanishedSourceError $_ }).Count -eq $errs.Count)
+    }
+
+    $log = New-RoboLog 'vuoto.log' @('   Terminato: nessun errore')
+    Assert-True (@(Get-RobocopyLogErrors $log).Count -eq 0) 'Log: nessun errore estratto da un log pulito'
+    Assert-True (-not (Test-Declassabile $log)) 'Log: senza errori non si declassa nulla'
+
+    $log = New-RoboLog 'effimero.log' @(
+        ('2026/10/19 17:10:04 ERRORE 3 (0x00000003) Copia del file in corso ' + $spariti)
+        'Impossibile trovare il percorso specificato.'
+        'Attesa di 2 secondi... Nuovo tentativo in corso...'
+        ('2026/10/19 17:10:34 ERRORE 3 (0x00000003) Copia del file in corso ' + $spariti)
+        'Impossibile trovare il percorso specificato.')
+    $errs = @(Get-RobocopyLogErrors $log)
+    Assert-True ($errs.Count -eq 1) 'Log: lo stesso file fallito due volte conta una volta sola'
+    Assert-True ($errs[0].Number -eq 3 -and $errs[0].Path -eq $spariti) 'Log: numero e percorso estratti dalla riga di errore'
+    Assert-True (Test-Declassabile $log) 'Declassamento: file sparito durante la copia e assente ora'
+
+    $log = New-RoboLog 'inglese.log' @(
+        ('2026/10/19 17:10:04 ERROR 2 (0x00000002) Copying File ' + $spariti)
+        'The system cannot find the file specified.')
+    Assert-True (Test-Declassabile $log) 'Declassamento: riconosciuto anche su log in inglese (ERROR 2)'
+
+    $log = New-RoboLog 'ricomparso.log' @(
+        ('2026/10/19 17:10:04 ERRORE 3 (0x00000003) Copia del file in corso ' + $presente)
+        'Impossibile trovare il percorso specificato.')
+    Assert-True (-not (Test-Declassabile $log)) 'Declassamento negato: il percorso esiste di nuovo'
+
+    $log = New-RoboLog 'misto.log' @(
+        ('2026/10/19 17:10:04 ERRORE 3 (0x00000003) Copia del file in corso ' + $spariti)
+        'Impossibile trovare il percorso specificato.'
+        ('2026/10/19 17:10:05 ERRORE 5 (0x00000005) Copia del file in corso ' + $presente)
+        'Accesso negato.')
+    Assert-True (@(Get-RobocopyLogErrors $log).Count -eq 2) 'Log: errori distinti contati separatamente'
+    Assert-True (-not (Test-Declassabile $log)) 'Declassamento negato: accanto al benigno c''e'' un errore 5'
+
+    $log = New-RoboLog 'pieno.log' @(
+        ('2026/10/19 17:10:04 ERRORE 112 (0x00000070) Copia del file in corso ' + $spariti)
+        'Spazio su disco insufficiente.')
+    Assert-True (-not (Test-Declassabile $log)) 'Declassamento negato: errore 112 non e'' mai benigno'
+
+    $log = New-RoboLog 'fuorisorgente.log' @(
+        '2026/10/19 17:10:04 ERRORE 3 (0x00000003) Copia del file in corso Q:\altrove\x.md'
+        'Impossibile trovare il percorso specificato.')
+    Assert-True (-not (Test-Declassabile $log)) 'Declassamento negato: percorso fuori dalla sorgente'
+
+    Assert-True (@(Get-RobocopyLogErrors (Join-Path $logRoot 'inesistente.log')).Count -eq 0) 'Log: file di log assente non fa eccezione'
+
     Write-Host "Verifiche superate: $passed"
 } finally {
     # Target fisso creato da questo test, verificato prima della rimozione ricorsiva.

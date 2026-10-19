@@ -287,3 +287,49 @@ function Write-LocalBackupError([string]$Reason) {
         Write-Host "Dettaglio salvato in $report"
     } catch { Write-Warning "Impossibile scrivere il rapporto locale: $($_.Exception.Message)" }
 }
+
+# ===== Analisi del log di robocopy ==================================
+
+# Errori estratti dal log di robocopy, deduplicati: numero, percorso coinvolto,
+# riga ripulita dal timestamp e descrizione (che robocopy scrive sulla riga dopo).
+# Il log e' nella code page OEM della console e in italiano dice 'ERRORE' dove
+# l'inglese dice 'ERROR'. Un file che fallisce anche al nuovo tentativo compare
+# piu' volte.
+function Get-RobocopyLogErrors {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)) { return @() }
+    $seen = @{}
+    Get-Content -LiteralPath $Path -Encoding Oem |
+        Select-String -Pattern '\bERRORE?\s+(\d+)\s+\(0x' -Context 0,1 |
+        ForEach-Object {
+            $text = ($_.Line -replace '^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+', '').Trim()
+            $msg  = if ($_.Context.PostContext) { $_.Context.PostContext[0].Trim() } else { '' }
+            $key  = $text + '|' + $msg
+            if (-not $seen.ContainsKey($key)) {
+                $seen[$key] = $true
+                $num  = [int]$_.Matches[0].Groups[1].Value
+                $file = if ($text -match '([A-Za-z]:\\.*)$') { $Matches[1].TrimEnd() } else { '' }
+                [pscustomobject]@{ Number = $num; Path = $file; Text = $text; Message = $msg }
+            }
+        }
+}
+
+# Un errore e' BENIGNO quando riguarda un elemento che non esiste piu' nemmeno in
+# origine: ERRORE 2 (file non trovato) o 3 (percorso non trovato) su un percorso
+# dentro la sorgente che adesso risulta assente. E' la firma del file effimero,
+# creato e cancellato da un altro processo mentre la copia era in corso: robocopy
+# enumera l'albero all'inizio e copia dopo, quindi un file nato e morto nel mezzo
+# risulta "non copiato" pur non essendo mai stato da salvare, e lo snapshot resta
+# fedele alla sorgente di fine copia.
+# Il controllo e' volutamente stretto: percorso DENTRO la sorgente e assente ORA.
+# Se il file e' ricomparso, o se il percorso non e' leggibile, non e' benigno.
+function Test-VanishedSourceError {
+    param($Entry)
+    if ($Entry.Number -ne 2 -and $Entry.Number -ne 3) { return $false }
+    if (-not $Entry.Path) { return $false }
+    try {
+        $src = [IO.Path]::GetFullPath($Source).TrimEnd('\') + '\'
+        if (-not $Entry.Path.StartsWith($src, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        return -not (Test-Path -LiteralPath $Entry.Path -ErrorAction SilentlyContinue)
+    } catch { return $false }
+}

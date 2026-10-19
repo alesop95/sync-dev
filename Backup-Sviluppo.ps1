@@ -209,6 +209,32 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
     $code = $LASTEXITCODE
     Write-Step ("Copia terminata in {0:hh\:mm\:ss} (codice robocopy {1})." -f ((Get-Date) - $t0), $code)
 
+    # --- Declassamento degli errori benigni -----------------------------
+    # Il bit 8 del codice robocopy dice "alcuni file non sono stati copiati" e da
+    # solo fa scartare l'intero snapshot. Ma un file effimero sparito durante la
+    # copia non e' una perdita: non esiste piu' nemmeno in origine. Il 2026-10-19
+    # un prova.md di scratch, cancellato alle 17:07 e cercato alle 17:10, ha fatto
+    # buttare 25,6 GB di copia buona, 168.252 file su 168.253 regolarmente copiati.
+    # Il declassamento scatta SOLO se OGNI errore del log e' di quel tipo: basta un
+    # errore 5 (accesso negato), 32 (file in uso) o 112 (disco pieno), o il bit 16
+    # (errore grave), e lo snapshot resta difettoso esattamente come prima.
+    $RoboCode   = $code
+    $BenignErrs = @()
+    if ($code -ge 8 -and -not ($code -band 16)) {
+        $logErrs = @(Get-RobocopyLogErrors $LogFile)
+        if ($logErrs.Count -gt 0) {
+            $BenignErrs = @($logErrs | Where-Object { Test-VanishedSourceError $_ })
+            if ($BenignErrs.Count -eq $logErrs.Count) {
+                $code = $code -band (-bnot 8)
+                Write-Step ("Errori benigni: {0} percors{1} spariti dalla sorgente durante la copia e assenti anche adesso. Codice robocopy {2} declassato a {3}: lo snapshot e' completo." -f `
+                            $BenignErrs.Count, $(if ($BenignErrs.Count -eq 1) { 'o' } else { 'i' }), $RoboCode, $code)
+                foreach ($b in $BenignErrs) { Write-Host ("    ignorato: " + $b.Path) }
+            } else {
+                $BenignErrs = @()
+            }
+        }
+    }
+
     # robocopy puo' propagare alla destinazione gli attributi della radice sorgente
     # (molte radici di volume sono Nascosto+Sistema), rendendo lo snapshot invisibile
     # in Esplora risorse pur contenendo i dati. Riportiamo le cartelle dello snapshot
@@ -234,6 +260,13 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
               $now.ToString('yyyy-MM-dd HH:mm:ss'), $rel, $stato, $count, $sizeMB
     Add-Content -LiteralPath $HistoryFile -Value $line -Encoding UTF8
     Write-Step "Snapshot $rel | $stato | $count file | $sizeMB MB"
+    # Il declassamento si annota a parte: la riga dello snapshot deve restare
+    # '| OK |' secco perche' Get-LastSnapshotBytes la ritrova con quel pattern.
+    if ($BenignErrs.Count -gt 0) {
+        Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
+            '{0} | EFFIMERI | {1} | codice robocopy {2} declassato a {3}: {4} percorsi spariti durante la copia e assenti anche in origine' -f `
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $rel, $RoboCode, $code, $BenignErrs.Count)
+    }
 
     # --- Memoria dell'esito: marca lo snapshot incompleto ---------------
     # Codice robocopy >= 8 = la copia e' arrivata in fondo ma alcuni file non
@@ -342,20 +375,10 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
         if ($code -band 16) { $codeMeaning += '16 = errore grave: robocopy si e'' fermato (destinazione non raggiungibile, accesso negato, disco pieno o scollegato).' }
         if ($code -band 8)  { $codeMeaning += '8 = alcuni file o cartelle non sono stati copiati nemmeno al nuovo tentativo (file in uso, permessi, I/O, spazio).' }
 
-        # Errori dal log robocopy (ERROR in inglese, ERRORE in italiano) con la
-        # riga successiva, che ne riporta la descrizione. Un file che fallisce
-        # anche al nuovo tentativo compare piu' volte: si deduplica.
-        $errs = @()
-        if (Test-Path -LiteralPath $LogFile) {
-            # robocopy scrive il log nella code page OEM della console.
-            $errs = @(Get-Content -LiteralPath $LogFile -Encoding Oem |
-                      Select-String -Pattern '\bERRORE?\s+\d+\s+\(0x' -Context 0,1 |
-                      ForEach-Object {
-                          $l = ($_.Line -replace '^\S+\s+\S+\s+', '').Trim()
-                          $m = if ($_.Context.PostContext) { $_.Context.PostContext[0].Trim() } else { '' }
-                          if ($m) { $l + "`r`n      " + $m } else { $l }
-                      } | Select-Object -Unique)
-        }
+        # Errori dal log robocopy: stessa analisi usata per il declassamento, cosi'
+        # rapporto e decisione leggono il log nello stesso modo.
+        $errs = @(Get-RobocopyLogErrors $LogFile |
+                  ForEach-Object { if ($_.Message) { $_.Text + "`r`n      " + $_.Message } else { $_.Text } })
         $maxErr = 40
 
         $drv  = Get-PSDrive -Name $ExpectedDriveLetter -ErrorAction SilentlyContinue
@@ -417,6 +440,10 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
             '   (IDE, Docker/WSL, database locali, client di sincronizzazione, Outlook).'
             '   Errore 32 = file in uso da un altro processo; 5 = accesso negato;'
             '   112 = spazio insufficiente su disco.'
+            '   Errore 2 o 3 = il percorso non esiste piu'' in origine: era effimero ed e'''
+            '   stato cancellato mentre la copia era in corso. Se TUTTI gli errori sono di'
+            '   questo tipo il backup NON fallisce. Se compare qui vuol dire che accanto a'
+            '   compare un secondo errore di natura diversa, o che il percorso e'' ricomparso.'
             ('2. Verifica che ' + $ExpectedDriveLetter + ': sia collegato e abbia spazio libero (ora: ' + $free + ').')
             '3. Rilancia il backup da PowerShell, senza pop-up:'
             ''

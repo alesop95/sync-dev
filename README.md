@@ -504,6 +504,41 @@ e' aperto in un IDE. `2026-09-03\17-40-00` viene eliminato, resta
 comando indicato nel rapporto: la nuova copia riesce, sostituisce `12-00-00` e il
 rapporto sparisce.
 
+### Errori benigni: il file sparito durante la copia
+
+Non ogni codice >= 8 e' una perdita. Robocopy enumera l'albero all'inizio e
+copia dopo: un file effimero creato e cancellato da un altro processo mentre la
+copia e' in corso risulta "non copiato" con **ERRORE 2** (file non trovato) o
+**ERRORE 3** (percorso non trovato), pur non essendo mai stato un dato da
+salvare. Lo snapshot resta fedele alla sorgente di fine copia.
+
+Prima di decidere, l'engine rilegge il proprio log robocopy e classifica ogni
+errore distinto. Un errore e' **benigno** se, e solo se, valgono tutte queste
+condizioni:
+
+- il numero e' 2 o 3;
+- il percorso si trova **dentro** la sorgente;
+- quel percorso risulta **assente anche adesso**, a copia finita.
+
+Se *tutti* gli errori del log sono benigni, il bit 8 viene tolto dal codice e lo
+snapshot e' trattato come completo: niente marcatura, niente scarto, niente
+rapporto di fallimento. Il declassamento viene annotato nello storico su una riga
+propria con esito `EFFIMERI`, mentre la riga dello snapshot resta `| OK |`.
+
+Basta una sola eccezione e il declassamento non avviene: un errore 5 (accesso
+negato), 32 (file in uso), 112 (disco pieno), un percorso fuori dalla sorgente,
+un percorso ricomparso, o il bit 16 (errore grave di robocopy). In quel caso lo
+snapshot resta difettoso e segue la procedura descritta sopra.
+
+Il motivo e' misurato. Il 2026-10-19 la copia delle 16:50 ha portato a termine
+168.252 file su 168.253: l'unico mancante era
+`...\_notes\tmp\guardia-modelli\.claude\templates\prova.md`, cancellato alle
+17:07 e cercato da robocopy alle 17:10. Il codice 11 ha fatto scartare 25,6 GB
+di copia buona, lasciando come unica copia quella del 2026-10-16. Lo stesso
+incidente, in altra forma, era gia' costato due esclusioni tampone
+(`COMMIT-MSG*.txt` il 2026-10-05, `E:\sync-dev\_logs` il 2026-10-16): il
+declassamento lo risolve alla radice, senza togliere dati dal backup.
+
 ## 10. Logging
 
 Due log distinti in `_logs`:
@@ -512,14 +547,17 @@ Due log distinti in `_logs`:
   retention. Registra data e ora, percorso relativo dello snapshot, esito e
   numero di file con dimensione totale. Registra anche i tentativi bloccati per
   sorgente assente, con esito `SCARTATO` gli snapshot difettosi eliminati
-  subito e con esito `PULIZIA` gli snapshot incompleti eliminati in seguito
-  (sezione 9). Esempio:
+  subito, con esito `PULIZIA` gli snapshot incompleti eliminati in seguito e con
+  esito `EFFIMERI` le copie promosse a complete perche' gli unici errori
+  riguardavano file spariti durante la copia (sezione 9). Esempio:
 
   ```
   2026-06-09 12:31:04 | 2026-06-09\12-31-04 | OK | 12483 file | 3250,4 MB
   2026-06-09 17:50:12 | 2026-06-09\17-50-12 | ERRORI (codice 8) -> vedi backup_20260609_175012.log | 12102 file | 3120,7 MB
   2026-06-09 17:50:12 | SCARTATO | 2026-06-09\17-50-12 | snapshot difettoso eliminato, resta 2026-06-09\12-31-04 -> vedi BACKUP-FALLITO-RILANCIARE.txt
   2026-06-09 18:05:40 | 2026-06-09\18-05-40 | OK | 12495 file | 3252,0 MB
+  2026-06-10 12:30:02 | 2026-06-10\12-30-02 | OK | 12502 file | 3253,1 MB
+  2026-06-10 12:30:02 | EFFIMERI | 2026-06-10\12-30-02 | codice robocopy 11 declassato a 3: 1 percorsi spariti durante la copia e assenti anche in origine
   ```
 
 - `backup_AAAAMMGG_HHMMSS.log`: log dettagliato di robocopy per ogni esecuzione,
