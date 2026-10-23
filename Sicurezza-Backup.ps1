@@ -3,21 +3,118 @@
     Non ripara, formatta o espelle il disco: quelle operazioni restano manuali.
 #>
 
-function Test-BackupVolume {
-    $result = [pscustomobject]@{ Ok = $false; Reason = '' }
+# ===== Interrogazioni al provider Storage ===========================
+
+# Get-Volume, Get-Partition e Get-Disk non hanno un timeout proprio: parlano con
+# il provider Storage di Windows, che per rispondere interroga TUTTI i dischi
+# della macchina. Basta quindi un solo dispositivo guasto, anche uno che con il
+# backup non c'entra niente, perche' il provider resti appeso sui suoi retry e
+# la chiamata non torni mai piu'.
+#
+# 2026-10-23: una chiavetta USB montata su G: smette di rispondere alle 10:02
+# (eventi disk/153 a raffica, LBA 0x0, disco 4). Il backup delle 16:50 si ferma
+# dentro la guardia sul volume e ci resta 42 minuti: zero CPU, zero I/O, nessun
+# log, nessun pop-up, nessuna riga nello storico. Il disco di backup stava
+# benissimo e il pop-up di conferma aspettava un engine che non sarebbe mai
+# tornato. Da qui in poi ogni interrogazione ha un tetto di tempo: un blocco
+# dichiarato, con un codice di uscita e un messaggio, vale sempre piu' di
+# un'attesa infinita e muta.
+
+function Get-StorageRetrySuspects {
+    # Numeri dei dischi su cui Windows sta ripetendo le operazioni di I/O
+    # (evento disk/153) nell'ultima ora. Quando il provider si impianta e'
+    # quasi sempre colpa di uno di questi, e dirlo evita di cercare il guasto
+    # nel disco di backup, che di solito non ha nulla che non va.
+    # Legge solo il registro eventi, mai il provider Storage, e non fallisce
+    # mai: e' diagnostica di contorno, non una guardia.
     try {
-        $volumes = @(Get-Volume -DriveLetter $ExpectedDriveLetter -ErrorAction Stop)
+        $events = @(Get-WinEvent -ErrorAction Stop -MaxEvents 200 -FilterHashtable @{
+            LogName = 'System'; ProviderName = 'disk'; Id = 153
+            StartTime = (Get-Date).AddHours(-1)
+        })
+        # Properties[2] e' il numero del disco: si legge dai dati dell'evento,
+        # non dal testo, che e' tradotto nella lingua di Windows.
+        return @($events |
+                 ForEach-Object { [string]$_.Properties[2].Value } |
+                 Where-Object { $_ } |
+                 Sort-Object -Unique)
+    } catch { return @() }
+}
+
+function Invoke-StorageQuery {
+    # Esegue $Query su un runspace separato e si arrende dopo
+    # $StorageQueryTimeoutSec lanciando [System.TimeoutException]. Il tipo
+    # dedicato serve ai chiamanti per distinguere "non lo so" da "il disco non
+    # c'e'": sono due diagnosi diverse e portano a due codici di uscita diversi.
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Query,
+        [object[]]$ArgumentList = @(),
+        [string]$Description = 'interrogazione dei dischi'
+    )
+    $timeout = if ($StorageQueryTimeoutSec -gt 0) { [int]$StorageQueryTimeoutSec } else { 45 }
+    $shell = [powershell]::Create()
+    $null = $shell.AddScript($Query.ToString())
+    foreach ($argument in $ArgumentList) { $null = $shell.AddArgument($argument) }
+    $async = $shell.BeginInvoke()
+    if (-not $async.AsyncWaitHandle.WaitOne([timespan]::FromSeconds($timeout))) {
+        # Il thread resta appeso dentro il provider e non si puo' interrompere:
+        # Stop() e Dispose() aspetterebbero proprio la chiamata che non torna,
+        # riproducendo lo stallo che si sta evitando. Lo si abbandona: e' un
+        # thread di background e non trattiene l'uscita del processo.
+        $suspects = @(Get-StorageRetrySuspects)
+        $hint = if ($suspects.Count -gt 0) {
+            " Windows sta ripetendo le operazioni di I/O sul disco {0} (eventi disk/153 nell'ultima ora): quasi certamente e' quello che tiene bloccato il provider. Scollegalo o ricollegalo, poi rilancia il backup." -f ($suspects -join ', ')
+        } else {
+            " Nessun disco risulta in retry nell'ultima ora: controlla i dispositivi USB collegati e il registro eventi di sistema."
+        }
+        throw (New-Object System.TimeoutException (
+            ("Il provider Storage di Windows non ha risposto entro $timeout secondi ($Description). " +
+             "Non e' detto che il problema sia il disco di backup: un disco guasto QUALUNQUE della macchina blocca queste interrogazioni per tutti." +
+             $hint +
+             " Copia e pulizia bloccate: non e' stato scritto nulla.")))
+    }
+    try { return $shell.EndInvoke($async) }
+    finally { $shell.Dispose() }
+}
+
+function Get-BackupVolumeInfo {
+    # Unico punto in cui si chiama Get-Volume. I test lo sostituiscono per
+    # simulare i volumi senza toccare un disco vero; la produzione ci passa
+    # sempre attraverso, cosi' il tetto di tempo non si aggira per distrazione
+    # aggiungendo altrove una seconda chiamata al provider.
+    param([string]$Letter)
+    return @(Invoke-StorageQuery -Description "stato del volume ${Letter}:" -ArgumentList $Letter -Query {
+        param($l)
+        Get-Volume -DriveLetter $l -ErrorAction Stop
+    })
+}
+
+# ===== Guardie sul volume ===========================================
+
+function Test-BackupVolume {
+    # Status: 'OK' | 'UNHEALTHY' | 'TIMEOUT' | 'UNKNOWN'. Serve al chiamante per
+    # scegliere il codice di uscita, perche' "volume da riparare" e "provider
+    # che non risponde" chiedono due reazioni diverse all'operatore.
+    $result = [pscustomobject]@{ Ok = $false; Status = 'UNKNOWN'; Reason = '' }
+    try {
+        $volumes = @(Get-BackupVolumeInfo $ExpectedDriveLetter)
         if ($volumes.Count -ne 1) { throw 'Volume non identificabile in modo univoco.' }
         $volume = $volumes[0]
         $health = [string]$volume.HealthStatus
         $operations = @($volume.OperationalStatus | ForEach-Object { [string]$_ })
         if ($health -ne 'Healthy' -or $operations.Count -eq 0 -or
             @($operations | Where-Object { $_ -ne 'OK' }).Count -gt 0) {
+            $result.Status = 'UNHEALTHY'
             $result.Reason = "Volume ${ExpectedDriveLetter}: ($($volume.FileSystemType)) non sano: $health / $($operations -join ', '). Copia e pulizia bloccate. Controlla e ripara il volume prima di rilanciare."
             return $result
         }
         $result.Ok = $true
+        $result.Status = 'OK'
+    } catch [System.TimeoutException] {
+        $result.Status = 'TIMEOUT'
+        $result.Reason = $_.Exception.Message
     } catch {
+        $result.Status = 'UNKNOWN'
         $result.Reason = "Impossibile verificare il volume ${ExpectedDriveLetter}: $($_.Exception.Message) Copia e pulizia bloccate."
     }
     return $result
@@ -26,7 +123,7 @@ function Test-BackupVolume {
 function Get-BackupFreeSpace {
     # Byte liberi sul volume di backup. Funzione a se' stante perche' i test la
     # sostituiscono per simulare un disco pieno senza saturarne uno vero.
-    $volumes = @(Get-Volume -DriveLetter $ExpectedDriveLetter -ErrorAction Stop)
+    $volumes = @(Get-BackupVolumeInfo $ExpectedDriveLetter)
     if ($volumes.Count -ne 1) { throw 'Volume non identificabile in modo univoco.' }
     return [long]$volumes[0].SizeRemaining
 }
@@ -55,8 +152,16 @@ function Test-BackupFreeSpace {
     # Guardia pre-volo: stima quanto occupera' il prossimo snapshot e lo confronta
     # con lo spazio libero PRIMA che venga scritto un solo byte. Se non basta, il
     # backup si ferma e il disco resta esattamente com'era.
-    $r = [pscustomobject]@{ Ok = $false; Reason = ''; FreeBytes = [long]0; NeedBytes = [long]0 }
+    # Status: 'OK' | 'LOWSPACE' | 'TIMEOUT' | 'UNKNOWN'. Un provider che non
+    # risponde non e' un disco pieno: segnalarlo come tale manderebbe
+    # l'operatore a liberare spazio su un disco che spazio ne ha.
+    $r = [pscustomobject]@{ Ok = $false; Status = 'UNKNOWN'; Reason = ''; FreeBytes = [long]0; NeedBytes = [long]0 }
     try { $r.FreeBytes = Get-BackupFreeSpace }
+    catch [System.TimeoutException] {
+        $r.Status = 'TIMEOUT'
+        $r.Reason = $_.Exception.Message
+        return $r
+    }
     catch {
         $r.Reason = "Spazio libero su ${ExpectedDriveLetter}: non verificabile: $($_.Exception.Message) Copia bloccata."
         return $r
@@ -76,9 +181,11 @@ function Test-BackupFreeSpace {
         }
         $r.Reason = "Spazio insufficiente su ${ExpectedDriveLetter}: liberi {0:N1} GB, servono {1:N1} GB ($stima). Copia BLOCCATA: non e' stato scritto nulla. Libera spazio sul disco di backup, poi rilancia." -f `
                     ($r.FreeBytes/1GB), ($r.NeedBytes/1GB)
+        $r.Status = 'LOWSPACE'
         return $r
     }
     $r.Ok = $true
+    $r.Status = 'OK'
     return $r
 }
 

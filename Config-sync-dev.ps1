@@ -104,6 +104,14 @@ $SpaceSafetyFactor = 1.8
 # delle pulizie e il fatto che lo snapshot vecchio viene eliminato DOPO la copia.
 $MinFreeMarginGB = 5
 
+# Secondi concessi a UNA interrogazione del provider Storage di Windows
+# (Get-Volume, Get-Partition, Get-Disk) prima di considerarla persa. Quelle
+# chiamate non hanno un timeout proprio, e un disco guasto QUALUNQUE della
+# macchina le blocca per sempre: vedi Invoke-StorageQuery in Sicurezza-Backup.ps1.
+# Generoso di proposito: su una macchina carica una risposta lenta e' normale,
+# un'attesa di tre quarti d'ora no.
+$StorageQueryTimeoutSec = 45
+
 # Codici di uscita per comunicare l'esito al chiamante
 $EXIT_OK              = 0
 $EXIT_DEVICE_MISMATCH = 101    # disco con la lettera attesa ma NON e' il dispositivo atteso
@@ -113,22 +121,35 @@ $EXIT_VOLUME_UNHEALTHY = 104   # volume degradato o stato non verificabile
 $EXIT_IO_FAILURE       = 105   # conteggio, log o pulizia non conclusi
 $EXIT_ALREADY_RUNNING  = 106   # backup gia' in corso, nessuna nuova copia
 $EXIT_LOW_SPACE        = 107   # spazio libero insufficiente: niente viene scritto
+$EXIT_STORAGE_TIMEOUT  = 108   # il provider Storage non risponde: stato dei dischi non verificabile
 
 # ===== Funzioni =====================================================
 
 function Get-DiskForLetter {
     param([string]$Letter)
+    # $null significa "nessun disco con quella lettera". Il timeout del provider
+    # NON e' quel caso e deve risalire al chiamante: confonderli farebbe dire
+    # "disco scollegato" mentre il disco e' li', collegato e sano.
     try {
-        $p = Get-Partition -DriveLetter $Letter -ErrorAction Stop
-        return ($p | Get-Disk -ErrorAction Stop)
-    } catch { return $null }
+        return (Invoke-StorageQuery -Description "disco della lettera ${Letter}:" -ArgumentList $Letter -Query {
+            param($l)
+            Get-Partition -DriveLetter $l -ErrorAction Stop | Get-Disk -ErrorAction Stop
+        })
+    }
+    catch [System.TimeoutException] { throw }
+    catch { return $null }
 }
 
 function Test-BackupDevice {
     # Verifica che la lettera attesa esista e punti al dispositivo atteso.
     # Ritorna un oggetto: Ok (bool), Status ('OK'|'NODISK'|'MODEL'|'SERIAL'), Reason (string).
     $r = [pscustomobject]@{ Ok = $false; Status = ''; Reason = '' }
-    $disk = Get-DiskForLetter -Letter $ExpectedDriveLetter
+    try { $disk = Get-DiskForLetter -Letter $ExpectedDriveLetter }
+    catch [System.TimeoutException] {
+        $r.Status = 'TIMEOUT'
+        $r.Reason = $_.Exception.Message
+        return $r
+    }
     if (-not $disk) {
         $r.Status = 'NODISK'
         $r.Reason = "Nessun disco con lettera ${ExpectedDriveLetter}: collegato."

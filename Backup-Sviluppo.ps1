@@ -94,6 +94,12 @@ try {
 $dev = Test-BackupDevice
 if (-not $dev.Ok) {
     Write-Host "[$(Get-Date -Format s)] BLOCCATO: $($dev.Reason)"
+    if ($dev.Status -eq 'TIMEOUT') {
+        # Il rapporto si scrive nei _logs del progetto e non su J:, perche' qui
+        # del disco di backup non si sa ancora niente.
+        Write-LocalBackupError $dev.Reason
+        exit $EXIT_STORAGE_TIMEOUT
+    }
     if ($dev.Status -eq 'NODISK') { exit $EXIT_DEVICE_MISSING } else { exit $EXIT_DEVICE_MISMATCH }
 }
 
@@ -102,6 +108,7 @@ $volume = Test-BackupVolume
 if (-not $volume.Ok) {
     Write-Step "BLOCCATO: $($volume.Reason)"
     Write-LocalBackupError $volume.Reason
+    if ($volume.Status -eq 'TIMEOUT') { exit $EXIT_STORAGE_TIMEOUT }
     exit $EXIT_VOLUME_UNHEALTHY
 }
 $null = Assert-BackupRoot
@@ -143,6 +150,14 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
     # il registro delle pulizie, e la cancellazione che libererebbe spazio non
     # parte (2026-10-16). Un exFAT saturo per giunta si corrompe.
     $space = Test-BackupFreeSpace
+    if ($space.Status -eq 'TIMEOUT') {
+        Write-Step "BLOCCATO: $($space.Reason)"
+        Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
+            '{0} | BLOCCATO | provider Storage non raggiungibile: spazio libero non verificabile' -f `
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+        Write-LocalBackupError $space.Reason
+        exit $EXIT_STORAGE_TIMEOUT
+    }
     if (-not $space.Ok) {
         $reason = $space.Reason
         # Il blocco deve dire anche COSA togliere, altrimenti e' un vicolo cieco.
@@ -484,6 +499,15 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
     } else {
         Write-Step "Backup terminato con errori di copia (codice $code). Consulta il rapporto prima di rilanciare."
     }
+}
+catch [System.TimeoutException] {
+    # Provider impiantato a copia gia' avviata: capita nella verifica che
+    # precede la pulizia. Lo snapshot resta marcato incompleto e nessuna
+    # cancellazione parte, quindi le copie precedenti restano dove sono.
+    $reason = $_.Exception.Message
+    Write-Step "BACKUP NON CONCLUSO: $reason"
+    Write-LocalBackupError $reason
+    exit $EXIT_STORAGE_TIMEOUT
 }
 catch {
     $reason = $_.Exception.Message

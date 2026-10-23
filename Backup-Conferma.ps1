@@ -64,6 +64,11 @@ switch ($code) {
         # fallire la copia: impedisce anche la pulizia che libererebbe spazio.
         $wshell.Popup("Spazio insufficiente sul disco di backup ${ExpectedDriveLetter}:.`nBackup BLOCCATO: non e' stato scritto nulla e le copie precedenti sono intatte.`n`nLibera spazio su ${ExpectedDriveLetter}: e rilancia.`n`nDettagli: $PSScriptRoot\_logs\BACKUP-ERRORE.txt", 0, "Backup Sviluppo - SPAZIO INSUFFICIENTE", 48 + 4096)
     }
+    108 {
+        # Non e' un problema del disco di backup: il messaggio deve dirlo subito,
+        # altrimenti si perde tempo a controllare J:, che di solito sta bene.
+        $wshell.Popup("Windows non risponde piu' alle interrogazioni sui dischi, quindi il backup non ha potuto verificare ${ExpectedDriveLetter}: e si e' fermato.`n`nNON e' stato scritto nulla: le copie precedenti sono intatte.`n`nDi solito la causa e' un ALTRO dispositivo collegato che ha smesso di rispondere (tipicamente una chiavetta o un disco USB). Scollegalo o ricollegalo, poi rilancia il backup.`n`nIl rapporto dice su quale disco Windows sta ripetendo le operazioni:`n$PSScriptRoot\_logs\BACKUP-ERRORE.txt", 0, "Backup Sviluppo - DISCHI NON INTERROGABILI", 48 + 4096)
+    }
     default {
         # Codice >= 8 = copia con file mancanti: l'engine ha eliminato lo snapshot
         # difettoso (resta solo l'ultima copia completa) e ha scritto in _logs il

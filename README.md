@@ -16,6 +16,11 @@ Caratteristiche principali:
   viene mostrato un alert; la sorgente puo' essere riconfigurata in un punto solo.
 - Verifica del volume prima delle scritture e dopo la copia: serve lo stato
   `Healthy / OK`. Un volume degradato o non verificabile blocca copia e pulizia.
+- Tetto di tempo sulle interrogazioni dei dischi: un dispositivo guasto
+  qualunque della macchina, anche estraneo al backup, puo' bloccare per sempre
+  `Get-Volume`. Scaduto il tetto l'engine si ferma con codice 108, nomina il
+  disco su cui Windows sta ripetendo le operazioni e non scrive niente
+  (sezione 7).
 - Verifica dello spazio libero prima di scrivere: se il disco non ha spazio per
   il nuovo snapshot la copia si blocca con codice 107 e il disco resta com'era.
   Serve a non saturare il volume, perche' un disco pieno non fa solo fallire la
@@ -321,6 +326,41 @@ Prima di ogni scrittura sul disco di backup, `Get-Volume` deve restituire
 o se il controllo non riesce, l'engine si ferma con codice 104 e lascia il
 dettaglio in `_logs\BACKUP-ERRORE.txt` accanto agli script, sul disco locale.
 Il controllo viene ripetuto dopo il conteggio e prima di ogni cancellazione.
+
+### Tetto di tempo sulle interrogazioni dei dischi (codice 108)
+
+`Get-Volume`, `Get-Partition` e `Get-Disk` non hanno un timeout proprio. Per
+rispondere passano dal provider Storage di Windows, che a sua volta interroga
+tutti i dischi della macchina: basta un solo dispositivo guasto, anche uno che
+con il backup non c'entra niente, perche' il provider resti appeso sui suoi
+retry e la chiamata non torni mai.
+
+Il 2026-10-23 e' successo. Una chiavetta USB montata su `G:` smette di
+rispondere alle 10:02 (eventi `disk` ID 153 a raffica, LBA `0x0`, disco 4) e il
+backup delle 16:50 si ferma dentro la guardia sul volume. Quarantadue minuti con
+zero CPU, zero I/O, nessun log, nessuna riga nello storico, nessun pop-up: il
+disco di backup stava benissimo, il pop-up di conferma aspettava un engine che
+non sarebbe mai tornato e da fuori il backup sembrava soltanto lungo. La copia
+delle 12:39 dello stesso giorno era riuscita, quindi non c'era nemmeno un
+fallimento a cui appoggiarsi per accorgersene.
+
+Da allora ogni interrogazione passa per `Invoke-StorageQuery`
+(`Sicurezza-Backup.ps1`), che la esegue su un runspace separato e si arrende
+dopo `$StorageQueryTimeoutSec` secondi (45 di default) lanciando
+`TimeoutException`. Le guardie distinguono quel caso da tutti gli altri e
+l'engine esce con codice 108: non 103 ("disco non collegato") e non 107 ("disco
+pieno"), che manderebbero a cercare il guasto nel posto sbagliato.
+
+Il messaggio nomina il colpevole quando riesce a riconoscerlo:
+`Get-StorageRetrySuspects` legge dal registro eventi i dischi su cui Windows sta
+ripetendo le operazioni di I/O nell'ultima ora e li cita nel rapporto locale e
+nel pop-up. Il rimedio e' scollegare o ricollegare quel dispositivo, non
+riparare il disco di backup.
+
+Il thread rimasto appeso dentro il provider non si puo' interrompere: `Stop()` e
+`Dispose()` aspetterebbero proprio la chiamata che non torna, riproducendo lo
+stallo che si sta evitando. Viene quindi abbandonato: e' un thread di background
+e non trattiene l'uscita del processo.
 
 ### Guardia sullo spazio libero (codice 107)
 
@@ -733,6 +773,7 @@ L'engine `Backup-Sviluppo.ps1` comunica l'esito al chiamante con questi codici:
 | 105 | Errore di I/O, verifica, log o pulizia: esecuzione non conclusa |
 | 106 | Backup gia' in corso: nessuna nuova copia avviata |
 | 107 | Spazio libero insufficiente: copia bloccata, nessuna scrittura sul disco |
+| 108 | Il provider Storage di Windows non risponde entro il tetto di tempo: stato dei dischi non verificabile, nessuna scrittura |
 | 8-16 | Errori riportati da robocopy (vedi log dettagliato) |
 
 ## 17. Controllo di versione e dati sensibili

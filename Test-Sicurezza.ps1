@@ -23,13 +23,23 @@ function Assert-Throws([scriptblock]$Action, [string]$Name) {
     try { & $Action | Out-Null } catch { $thrown = $true }
     Assert-True $thrown $Name
 }
-function Get-Volume {
-    [CmdletBinding()] param([string]$DriveLetter)
+function Assert-ThrowsTimeout([scriptblock]$Action, [string]$Name) {
+    # Il TIPO dell'eccezione e' il contratto fra Invoke-StorageQuery e le
+    # guardie: se degrada a eccezione generica, il backup torna a segnalare
+    # "disco assente" o "disco pieno" al posto di "provider non raggiungibile".
+    $caught = $null
+    try { & $Action | Out-Null } catch { $caught = $_.Exception }
+    Assert-True ($caught -is [System.TimeoutException]) $Name
+}
+function Get-BackupVolumeInfo {
+    [CmdletBinding()] param([string]$Letter)
+    if ($script:volumeTimeout) { throw (New-Object System.TimeoutException 'Provider simulato: nessuna risposta') }
     if ($script:volumeThrows) { throw 'Query volume non disponibile' }
     return $script:mockVolumes
 }
 $mockVolumes = @([pscustomobject]@{ HealthStatus = 'Healthy'; OperationalStatus = @('OK'); FileSystemType = 'exFAT' })
 $volumeThrows = $false
+$volumeTimeout = $false
 
 try {
     Assert-True (Test-BackupVolume).Ok 'Volume sano accettato'
@@ -44,6 +54,40 @@ try {
     Assert-True (-not (Test-BackupVolume).Ok) 'Errore della query bloccato'
     $volumeThrows = $false
     $mockVolumes = @([pscustomobject]@{ HealthStatus = 'Healthy'; OperationalStatus = @('OK'); FileSystemType = 'exFAT' })
+
+    # --- Tetto di tempo sulle interrogazioni dei dischi (2026-10-23) ---
+    # Senza questo, un disco guasto qualunque della macchina ferma il backup
+    # per sempre dentro una guardia, senza log ne' pop-up: e' successo davvero.
+    $StorageQueryTimeoutSec = 2
+    Assert-True ((Invoke-StorageQuery -Query { param($x) $x * 2 } -ArgumentList 21) -eq 42) `
+        'Query ai dischi: il valore torna al chiamante'
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    Assert-ThrowsTimeout { Invoke-StorageQuery -Query { Start-Sleep -Seconds 60 } -Description 'prova' } `
+        'Query ai dischi che non torna: TimeoutException invece di attesa infinita'
+    $elapsed.Stop()
+    Assert-True ($elapsed.Elapsed.TotalSeconds -lt 30) `
+        'Query ai dischi che non torna: si molla al timeout, non si aspetta la fine'
+    Assert-True (@(Get-StorageRetrySuspects) -isnot [System.Exception]) `
+        'Diagnostica dei dischi in retry: non fallisce mai'
+
+    $volumeTimeout = $true
+    $timedOut = Test-BackupVolume
+    Assert-True (-not $timedOut.Ok -and $timedOut.Status -eq 'TIMEOUT') `
+        'Provider che non risponde: volume bloccato con stato TIMEOUT, non UNKNOWN'
+    $timedOutSpace = Test-BackupFreeSpace
+    Assert-True (-not $timedOutSpace.Ok -and $timedOutSpace.Status -eq 'TIMEOUT') `
+        'Provider che non risponde: spazio bloccato con stato TIMEOUT, non disco pieno'
+    # Su un percorso inesistente Remove-TreeFast esce prima di interrogare il
+    # volume: per verificare la guardia serve una cartella che esiste davvero.
+    $daSalvare = Join-Path $BackupRoot '2026-01-01\09-00-00'
+    New-Item -ItemType Directory -Path $daSalvare -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $daSalvare 'dentro.txt') -Value 'non si tocca'
+    Assert-Throws { Remove-TreeFast $daSalvare } `
+        'Provider che non risponde: nessuna cancellazione parte'
+    Assert-True (Test-Path -LiteralPath (Join-Path $daSalvare 'dentro.txt')) `
+        'Provider che non risponde: lo snapshot resta intatto'
+    $volumeTimeout = $false
+    $StorageQueryTimeoutSec = 45
 
     Assert-Throws { Remove-TreeFast $BackupRoot } 'Radice del backup protetta'
     Assert-Throws { Remove-TreeFast $Source } 'Sorgente protetta'
@@ -195,8 +239,8 @@ $ExpectedDriveLetter = [IO.Path]::GetPathRoot($BackupRoot).Substring(0, 1)
 $script:scenario = '__SCENARIO__'
 $script:copyCalled = $false
 function Test-BackupDevice { [pscustomobject]@{ Ok = $true; Status = 'OK'; Reason = '' } }
-function Get-Volume {
-    [CmdletBinding()] param([string]$DriveLetter)
+function Get-BackupVolumeInfo {
+    [CmdletBinding()] param([string]$Letter)
     $bad = $script:scenario -eq 'unhealthy' -or ($script:scenario -eq 'degraded-after-copy' -and $script:copyCalled)
     [pscustomobject]@{
         HealthStatus = $(if ($bad) { 'Warning' } else { 'Healthy' })
