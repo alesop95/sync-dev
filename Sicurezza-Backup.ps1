@@ -386,10 +386,32 @@ function Remove-TreeFast([string]$Path) {
     $empty = Join-Path ([IO.Path]::GetFullPath($env:TEMP)) ('sync-dev-empty-' + [guid]::NewGuid().ToString('N'))
     try {
         New-Item -ItemType Directory -Path $empty -ErrorAction Stop | Out-Null
-        # /XJ evita di seguire collegamenti. I percorsi sono verificati prima di /MIR.
-        robocopy.exe $empty $resolved /MIR /XJ /NJH /NJS /NP /NFL /NDL /R:1 /W:1 | Out-Null
-        $cleanupCode = $LASTEXITCODE
-        if ($cleanupCode -ge 8) { throw "Pulizia fallita (robocopy $cleanupCode): $resolved" }
+        # Un file aperto da un altro processo (antivirus, indicizzatore) non viene
+        # eliminato, ma robocopy NON lo conta come errore: ERRORE 32 nel log e
+        # codice 2, cioe' successo. Il 2026-10-26 sono rimasti cosi' due .py in
+        # 2026-10-26\11-30-06 e la retention e' caduta su Directory.Delete con un
+        # laconico "La directory non e' vuota". Il residuo si verifica quindi a
+        # ogni passata e la purga si ripete con attese crescenti: i blocchi di
+        # questo tipo durano secondi. $CleanupRetryDelays e' sovrascrivibile dai test.
+        $delays = if ($null -ne $CleanupRetryDelays) { @($CleanupRetryDelays) } else { @(5, 15, 30) }
+        $left = @()
+        for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+            if ($attempt -gt 0) {
+                Write-Host "Pulizia: $($left.Count) file ancora presenti in $resolved, nuovo tentativo tra $($delays[$attempt - 1]) s"
+                Start-Sleep -Seconds $delays[$attempt - 1]
+            }
+            # /XJ evita di seguire collegamenti. I percorsi sono verificati prima di /MIR.
+            robocopy.exe $empty $resolved /MIR /XJ /NJH /NJS /NP /NFL /NDL /R:1 /W:1 | Out-Null
+            $cleanupCode = $LASTEXITCODE
+            if ($cleanupCode -ge 8) { throw "Pulizia fallita (robocopy $cleanupCode): $resolved" }
+            $left = @(Get-ChildItem -LiteralPath $resolved -Recurse -File -Force -ErrorAction Stop)
+            if ($left.Count -eq 0) { break }
+        }
+        if ($left.Count -gt 0) {
+            $names = @($left | Select-Object -First 5 | ForEach-Object { $_.FullName.Substring($resolved.Length + 1) })
+            throw ("Pulizia incompleta di {0}: {1} file non eliminati dopo {2} tentativi, probabilmente in uso da un altro processo (antivirus, indicizzatore, editor aperto sul disco di backup): {3}. " +
+                   "La cancellazione resta registrata e riprende al prossimo backup.") -f $resolved, $left.Count, ($delays.Count + 1), ($names -join ', ')
+        }
         # Non ricorre sui residui: se /MIR non ha svuotato tutto, fallisce.
         [IO.Directory]::Delete($resolved, $false)
         if (Test-Path -LiteralPath $resolved -ErrorAction Stop) { throw "Residuo ancora presente: $resolved" }

@@ -522,6 +522,13 @@ rifiutati. La rimozione usa robocopy con `/MIR /XJ` e controlla il codice di
 uscita, poi elimina la directory solo se vuota. Un errore ferma la pulizia e
 restituisce 105, senza registrare una cancellazione riuscita.
 
+Un file aperto da un altro processo (antivirus, indicizzatore, editor) non viene
+eliminato, ma robocopy lo segnala solo nel log (ERRORE 32) ed esce con un codice
+di successo. Per questo dopo ogni passata si contano i file rimasti e la purga si
+ripete fino a tre volte, dopo 5, 15 e 30 secondi. Se il residuo persiste,
+l'errore elenca i primi file rimasti e la cancellazione resta registrata: il
+backup successivo la riprende da solo.
+
 Prima della copia e dopo la verifica, se esiste una copia completa da conservare,
 si eliminano gli snapshot marcati incompleti, si riprendono le cancellazioni
 pendenti e si rimuovono i giorni vuoti. Questo libera lo spazio dei residui

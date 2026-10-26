@@ -148,6 +148,40 @@ try {
     Remove-TreeFast $failedSnapshot
     Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Pulizia pendente ripresa e verificata'
 
+    # Un file in uso non viene eliminato ma robocopy esce con 2 (successo): il
+    # residuo va riconosciuto e la purga ripetuta (caso del 2026-10-26).
+    $CleanupRetryDelays = @(0, 0)
+    $lockedSnapshot = Join-Path $BackupRoot '2026-01-04\08-00-00'
+    New-Item -ItemType Directory -Path (Join-Path $lockedSnapshot 'sub') | Out-Null
+    Set-Content -LiteralPath (Join-Path $lockedSnapshot 'sub\bloccato.py') -Value 'in uso'
+    $script:roboCalls = 0
+    $realRobocopy = (Get-Command robocopy.exe -CommandType Application).Source
+    function robocopy.exe {
+        $script:roboCalls++
+        if ($script:roboCalls -eq 1) { $global:LASTEXITCODE = 2; return }
+        & $realRobocopy @args
+    }
+    try {
+        Remove-TreeFast $lockedSnapshot
+        Assert-True (-not (Test-Path -LiteralPath $lockedSnapshot)) 'Blocco transitorio: residuo eliminato al tentativo successivo'
+        Assert-True ($script:roboCalls -eq 2) 'Blocco transitorio: purga ripetuta una sola volta'
+        Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Blocco transitorio: registro chiuso'
+    } finally { Remove-Item -LiteralPath 'Function:\robocopy.exe' }
+
+    New-Item -ItemType Directory -Path (Join-Path $lockedSnapshot 'sub') | Out-Null
+    $lockedFile = Join-Path $lockedSnapshot 'sub\bloccato.py'
+    Set-Content -LiteralPath $lockedFile -Value 'in uso'
+    $handle = [IO.File]::Open($lockedFile, 'Open', 'Read', 'Read')
+    try {
+        $message = ''
+        try { Remove-TreeFast $lockedSnapshot } catch { $message = $_.Exception.Message }
+        Assert-True ($message -like '*Pulizia incompleta*bloccato.py*') 'Blocco persistente: errore esplicito con il file rimasto'
+        Assert-True (@(Get-PendingCleanup) -contains '2026-01-04\08-00-00') 'Blocco persistente: residuo registrato per il recupero'
+    } finally { $handle.Close() }
+    Remove-TreeFast $lockedSnapshot
+    Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Blocco rilasciato: pulizia ripresa e verificata'
+    $CleanupRetryDelays = $null
+
     # ===== Guardia sullo spazio libero ==============================
     # Lo storico e' scritto nella cultura italiana: '.' per le migliaia, ','
     # per i decimali. Una lettura sbagliata qui falserebbe la stima.
