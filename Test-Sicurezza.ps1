@@ -89,6 +89,22 @@ try {
     $volumeTimeout = $false
     $StorageQueryTimeoutSec = 45
 
+    # --- Contro il provider VERO, non contro uno stub (2026-10-26) ---
+    # Gli stub qui sopra restituiscono stringhe e non potevano accorgersi che il
+    # percorso reale ne restituiva di numeriche: il primo backup col tetto di
+    # tempo si e' bloccato su un volume sano letto come "0 / 2". Questa verifica
+    # attraversa Invoke-StorageQuery e il provider per davvero, in sola lettura,
+    # sulla lettera del disco temporaneo di test.
+    $reale = @(Get-VolumeInfoFromProvider $ExpectedDriveLetter)
+    Assert-True ($reale.Count -eq 1) 'Provider reale: un solo volume per la lettera di test'
+    Assert-True ($reale[0].HealthStatus -notmatch '^\d+$') `
+        'Provider reale: HealthStatus e'' una parola, non il codice numerico CIM'
+    Assert-True (@($reale[0].OperationalStatus | Where-Object { $_ -match '^\d+$' }).Count -eq 0) `
+        'Provider reale: OperationalStatus e'' una parola, non il codice numerico CIM'
+    Assert-True ($reale[0].FileSystemType -notmatch '^\d+$') `
+        'Provider reale: FileSystemType e'' una parola, non il codice numerico CIM'
+    Assert-True ($reale[0].SizeRemaining -gt 0) 'Provider reale: spazio libero letto come numero'
+
     Assert-Throws { Remove-TreeFast $BackupRoot } 'Radice del backup protetta'
     Assert-Throws { Remove-TreeFast $Source } 'Sorgente protetta'
     Assert-Throws { Remove-TreeFast (Join-Path $BackupRoot '..\source') } 'Traversal fuori dalla radice bloccato'

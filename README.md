@@ -362,6 +362,46 @@ Il thread rimasto appeso dentro il provider non si puo' interrompere: `Stop()` e
 stallo che si sta evitando. Viene quindi abbandonato: e' un thread di background
 e non trattiene l'uscita del processo.
 
+### La trappola dell'adattatore di tipi (regressione del 2026-10-26)
+
+Il primo backup eseguito dopo l'introduzione del tetto di tempo si e' bloccato
+con codice 104 su un volume perfettamente sano:
+
+```
+BLOCCATO: Volume J: (16) non sano: 0 / 2
+```
+
+`16`, `0` e `2` sono `exFAT`, `Healthy` e `OK` nella forma numerica con cui il
+provider li restituisce davvero. Quelle parole non stanno nell'oggetto: le
+produce l'adattatore di tipi del modulo Storage, e l'adattatore vive nel
+runspace in cui il modulo e' stato caricato. L'engine gira come processo nuovo
+e non chiama mai `Get-Volume` nel runspace principale, quindi li' l'adattatore
+non c'e', l'oggetto arriva con i codici grezzi e il confronto con le stringhe
+boccia un volume sano.
+
+La correzione sta in `Get-VolumeInfoFromProvider`: i valori vengono proiettati
+in un `pscustomobject` di stringhe vere **dentro** il runspace, dove il modulo
+e' caricato, cosi' chi chiama non dipende piu' da nessun adattatore.
+
+I test non l'avevano intercettata, ed e' la parte istruttiva. Gli stub
+sostituivano il punto di aggancio proprio dove si attraversa il confine fra
+runspace, e restituivano stringhe: quel confine non veniva mai percorso. Il
+punto di aggancio che rendeva i test puliti era esattamente cio' che nascondeva
+il difetto. La prova dal vivo del 2026-10-23 non lo aveva visto per un secondo
+motivo: il provider era impiantato, l'engine si fermava al timeout e non
+arrivava mai a leggere un volume, quindi il caso in cui le cose funzionano non
+era mai stato esercitato.
+
+Da qui due scelte. Le cinque verifiche che interrogano il provider **reale** in
+sola lettura e falliscono se tornano codici invece di parole; e la separazione
+fra `Get-BackupVolumeInfo`, che i test sostituiscono per simulare i volumi, e
+`Get-VolumeInfoFromProvider`, che non viene sostituita mai e resta percorribile
+dal vero.
+
+Il guasto che ha fatto nascere tutto questo, e le impostazioni di Windows che
+lo hanno favorito, sono documentati in `docs\18_USB_SOSPENSIONE_E_SUPPORTI_RIMOVIBILI.md`
+del progetto `windows-status`.
+
 ### Guardia sullo spazio libero (codice 107)
 
 Dopo il recupero dei residui e prima di creare qualsiasi cartella, l'engine

@@ -77,16 +77,49 @@ function Invoke-StorageQuery {
     finally { $shell.Dispose() }
 }
 
-function Get-BackupVolumeInfo {
-    # Unico punto in cui si chiama Get-Volume. I test lo sostituiscono per
-    # simulare i volumi senza toccare un disco vero; la produzione ci passa
-    # sempre attraverso, cosi' il tetto di tempo non si aggira per distrazione
-    # aggiungendo altrove una seconda chiamata al provider.
+function Get-VolumeInfoFromProvider {
+    # Implementazione reale, MAI sostituita dai test: e' qui che si parla con il
+    # provider, e deve restare verificabile dal vero.
+    #
+    # La proiezione a stringhe dentro il runspace non e' cosmetica, e' il punto
+    # di tutta la funzione. Get-Volume restituisce un CimInstance in cui
+    # HealthStatus e OperationalStatus sono numeri: la parola "Healthy" la
+    # produce l'adattatore di tipi del modulo Storage, e quell'adattatore vive
+    # nel runspace dove il modulo e' caricato. Se l'oggetto attraversa il
+    # confine verso un runspace che non lo ha importato, le parole scompaiono e
+    # restano i codici grezzi.
+    #
+    # 2026-10-26: successo davvero. Il primo backup dopo l'introduzione del
+    # tetto di tempo si e' bloccato con "Volume J: (16) non sano: 0 / 2", cioe'
+    # exFAT / Healthy / OK letti come numeri e confrontati con le stringhe. Il
+    # volume era perfetto. L'engine gira come processo nuovo e non chiama mai
+    # Get-Volume nel runspace principale, quindi li' l'adattatore non c'e'.
+    # Proiettando qui dentro, dove il modulo e' caricato, il chiamante riceve un
+    # oggetto semplice con stringhe vere e non dipende piu' da nessun adattatore.
     param([string]$Letter)
     return @(Invoke-StorageQuery -Description "stato del volume ${Letter}:" -ArgumentList $Letter -Query {
         param($l)
-        Get-Volume -DriveLetter $l -ErrorAction Stop
+        Get-Volume -DriveLetter $l -ErrorAction Stop | ForEach-Object {
+            [pscustomobject]@{
+                DriveLetter       = [string]$_.DriveLetter
+                FileSystemLabel   = [string]$_.FileSystemLabel
+                FileSystemType    = [string]$_.FileSystemType
+                HealthStatus      = [string]$_.HealthStatus
+                OperationalStatus = @($_.OperationalStatus | ForEach-Object { [string]$_ })
+                Size              = [long]$_.Size
+                SizeRemaining     = [long]$_.SizeRemaining
+            }
+        }
     })
+}
+
+function Get-BackupVolumeInfo {
+    # Unico punto da cui le guardie leggono lo stato del volume. I test
+    # sostituiscono QUESTO per simulare i volumi senza toccare un disco vero,
+    # e lasciano intatta Get-VolumeInfoFromProvider, che resta cosi'
+    # verificabile contro il provider reale.
+    param([string]$Letter)
+    return @(Get-VolumeInfoFromProvider $Letter)
 }
 
 # ===== Guardie sul volume ===========================================
