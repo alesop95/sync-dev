@@ -5,6 +5,12 @@
 _logs/
 storico-snapshot.txt
 
+# Appunti di sessione e messaggi di commit proposti dall'agente: materiale di
+# passaggio, non storia del progetto. Il backup li escludeva gia' (COMMIT-MSG*.txt
+# in $ExcludeFiles di Config-sync-dev.ps1), ma git no, e bastava un `git add -A`
+# per portarseli dentro. Aggiunto il 2026-10-26 su richiesta del proprietario.
+_notes/
+
 # Cartelle datate degli snapshot (formato AAAA-MM-GG), se create per errore nel repo.
 [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
 
