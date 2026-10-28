@@ -112,6 +112,15 @@ $MinFreeMarginGB = 5
 # un'attesa di tre quarti d'ora no.
 $StorageQueryTimeoutSec = 45
 
+# Seconda passata di robocopy quando la prima torna con "alcuni file non
+# copiati" (bit 8) ma non con un errore grave (bit 16). Usa gli stessi
+# argomenti, quindi /E e mai /MIR: ricopia cio' che manca e non cancella
+# niente. Serve ai guasti che robocopy conta e non racconta (2026-10-28: una
+# directory non riuscita su 20.945, zero righe di errore nel log) e a quelli
+# transitori, dove /R:1 e' una rete troppo larga. Costa un'altra enumerazione
+# della sorgente, e solo quando la copia e' gia' andata male.
+$RetryCopyOnFailure = $true
+
 # Codici di uscita per comunicare l'esito al chiamante
 $EXIT_OK              = 0
 $EXIT_DEVICE_MISMATCH = 101    # disco con la lettera attesa ma NON e' il dispositivo atteso

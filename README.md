@@ -30,6 +30,10 @@ Caratteristiche principali:
   Gli errori di I/O o retention impediscono di dichiarare riuscita l'esecuzione.
 - Snapshot datati con retention a finestra di giorni solari (oggi incluso) e
   sul numero di snapshot: resta solo l'ultima copia completa.
+- Seconda passata prima di buttare una copia: se robocopy segnala "alcuni file
+  non copiati" senza un errore grave, l'engine ripete la copia sullo stesso
+  snapshot e la scarta solo se fallisce di nuovo. Serve ai guasti transitori e a
+  quelli che robocopy conta nel riepilogo senza scriverli nel log (sezione 9).
 - Memoria degli snapshot incompleti: se robocopy termina con file mancanti, lo
   snapshot difettoso viene eliminato subito, resta solo l'ultima copia completa
   e in `_logs` viene scritto un rapporto con i file non copiati e i comandi per
@@ -121,6 +125,7 @@ dot-source dagli altri script.
 | `$ExcludeFiles` | vedi file | Pattern di file esclusi |
 | `$SpaceSafetyFactor` | `1.8` | Moltiplicatore sulla dimensione logica dell'ultimo snapshot per stimare quella reale. `1.8` su exFAT con cluster da 128 KB (misurato fra 1,62x e 1,85x), `1.15` basta su NTFS con cluster da 4 KB |
 | `$MinFreeMarginGB` | `5` | Margine libero preteso oltre alla stima, in GB |
+| `$RetryCopyOnFailure` | `$true` | Seconda passata di robocopy quando la prima torna con "alcuni file non copiati" (bit 8) ma non con un errore grave (bit 16): ricopia cio' che manca e non cancella niente (sezione 9) |
 
 Per cambiare modello di SSD in futuro, basta aggiornare `$ExpectedDiskModel` ed
 eventualmente `$ExpectedDiskSerial`. Per cambiare sorgente, basta aggiornare
@@ -316,7 +321,10 @@ tramite i codici di uscita della sezione 16.
 
 La fine della copia robocopy non coincide con la fine del backup: restano il
 conteggio, la verifica del volume e la pulizia, che possono durare diversi
-minuti con centinaia di migliaia di file. Attendere il messaggio finale, poi
+minuti con centinaia di migliaia di file. Se la copia e' uscita con errori non
+gravi, prima del conteggio si inserisce una seconda passata di robocopy sullo
+stesso snapshot, che allunga l'esecuzione del tempo di una nuova enumerazione
+della sorgente (sezione 9). Attendere il messaggio finale, poi
 richiedere la rimozione sicura da Windows e attendere che sia autorizzata.
 Una richiesta di espulsione rifiutata significa che il dispositivo e' ancora
 occupato, anche se la fase di copia e' gia' terminata.
@@ -524,10 +532,17 @@ restituisce 105, senza registrare una cancellazione riuscita.
 
 Un file aperto da un altro processo (antivirus, indicizzatore, editor) non viene
 eliminato, ma robocopy lo segnala solo nel log (ERRORE 32) ed esce con un codice
-di successo. Per questo dopo ogni passata si contano i file rimasti e la purga si
-ripete fino a tre volte, dopo 5, 15 e 30 secondi. Se il residuo persiste,
-l'errore elenca i primi file rimasti e la cancellazione resta registrata: il
-backup successivo la riprende da solo.
+di successo. Per questo dopo ogni passata si contano gli elementi rimasti e la
+purga si ripete fino a tre volte, dopo 5, 15 e 30 secondi. Se il residuo
+persiste, l'errore elenca i primi elementi rimasti e la cancellazione resta
+registrata: il backup successivo la riprende da solo.
+
+Si contano file **e** cartelle. Una `/MIR` che non riesce a togliere una sola
+cartella lascia un albero senza file e non vuoto: guardando i soli file il
+residuo risultava inesistente, la purga non si ripeteva e la rimozione finale,
+che non e' ricorsiva, falliva con un laconico "La directory non e' vuota" che
+non diceva quale. Ora il residuo viene riconosciuto e nominato come qualunque
+altro.
 
 Prima della copia e dopo la verifica, se esiste una copia completa da conservare,
 si eliminano gli snapshot marcati incompleti, si riprendono le cancellazioni
@@ -626,6 +641,52 @@ incidente, in altra forma, era gia' costato due esclusioni tampone
 (`COMMIT-MSG*.txt` il 2026-10-05, `E:\sync-dev\_logs` il 2026-10-16): il
 declassamento lo risolve alla radice, senza togliere dati dal backup.
 
+### La seconda passata: il guasto che robocopy conta e non racconta
+
+Il declassamento descritto sopra sa decidere solo se il log porta righe di
+errore. Robocopy pero' puo' contare un guasto nel riepilogo finale e non
+scriverne niente.
+
+Il 2026-10-28 la copia delle 11:30 e' uscita con codice 11. Nel riepilogo:
+20.945 directory esaminate, **1 non riuscita**; 195.088 file, **0 non
+riusciti**; 0 byte falliti. Nel log, nessuna riga `ERRORE`. Il declassamento non
+ha trovato niente da declassare, lo snapshot e' stato dichiarato difettoso ed
+eliminato, e il rapporto di fallimento ha annunciato "errori distinti nel log:
+0" consigliando di controllare il codice 16, che non c'entrava. Risultato: 28,9
+GB copiati bene buttati per una cartella di cui non si sapra' mai il nome, e il
+backup tornato all'ultima copia del giorno prima.
+
+Invece di indovinare, adesso si riprova. Se il codice ha il bit 8 ma non il bit
+16, e `$RetryCopyOnFailure` e' attivo, l'engine fa una **seconda passata** con
+gli stessi argomenti sullo stesso snapshot: `/E` e mai `/MIR`, quindi ricopia
+cio' che manca e non cancella niente. Costa un'altra enumerazione della
+sorgente, e solo quando la copia e' gia' andata male.
+
+- Se la seconda passata torna con codice < 8, lo snapshot e' completo **per
+  constatazione** e non per deduzione: robocopy ha appena riguardato tutto e non
+  ha trovato piu' niente da fare. Il bit 8 viene tolto.
+- Se fallisce ma i soli errori rimasti sono percorsi spariti dalla sorgente,
+  vale la stessa clemenza della prima passata.
+- Se fallisce davvero, il guasto e' reale e lo snapshot segue la procedura di
+  sempre, con il rapporto di fallimento che ora cita entrambi i log.
+
+Prima della seconda passata si ricontrolla il volume: su un disco che nel
+frattempo si e' degradato non si scrive, e la ripresa viene saltata.
+
+La ripresa serve anche ai guasti transitori che una riga di errore ce l'hanno,
+per esempio il file tenuto aperto un istante dall'antivirus: `/R:1` e' una rete
+a maglie larghe, una passata intera e' il tentativo serio. In entrambi i casi
+l'esito viene annotato nello storico su una riga `RIPRESA` e il log della
+seconda passata resta accanto al primo.
+
+Il riepilogo di robocopy viene letto **per posizione** e non per etichetta: la
+tabella e' tradotta nella lingua di Windows (`Directory`/`File` in italiano,
+`Dirs`/`Files` in inglese), ma le sei colonne di interi sono sempre le stesse e
+solo quelle due righe le hanno tutte intere. La quinta colonna e' "Non
+riuscita". Cosi' il rapporto di fallimento, quando il log non spiega niente,
+puo' almeno dire quante directory e quanti file robocopy ha contato come non
+riusciti, invece di affermare che non e' successo niente.
+
 ## 10. Logging
 
 Due log distinti in `_logs`:
@@ -636,7 +697,9 @@ Due log distinti in `_logs`:
   sorgente assente, con esito `SCARTATO` gli snapshot difettosi eliminati
   subito, con esito `PULIZIA` gli snapshot incompleti eliminati in seguito e con
   esito `EFFIMERI` le copie promosse a complete perche' gli unici errori
-  riguardavano file spariti durante la copia (sezione 9). Esempio:
+  riguardavano file spariti durante la copia, e con esito `RIPRESA` l'esito
+  della seconda passata quando la prima e' uscita con errori (sezione 9).
+  Esempio:
 
   ```
   2026-06-09 12:31:04 | 2026-06-09\12-31-04 | OK | 12483 file | 3250,4 MB
@@ -645,6 +708,8 @@ Due log distinti in `_logs`:
   2026-06-09 18:05:40 | 2026-06-09\18-05-40 | OK | 12495 file | 3252,0 MB
   2026-06-10 12:30:02 | 2026-06-10\12-30-02 | OK | 12502 file | 3253,1 MB
   2026-06-10 12:30:02 | EFFIMERI | 2026-06-10\12-30-02 | codice robocopy 11 declassato a 3: 1 percorsi spariti durante la copia e assenti anche in origine
+  2026-06-11 11:30:05 | 2026-06-11\11-30-05 | OK | 12540 file | 3261,8 MB
+  2026-06-11 11:30:05 | RIPRESA | 2026-06-11\11-30-05 | codice robocopy 11 declassato a 3: niente piu' da copiare -> vedi backup_20260611_113005_ripresa.log
   ```
 
 - `backup_AAAAMMGG_HHMMSS.log`: log dettagliato di robocopy per ogni esecuzione,
@@ -654,9 +719,15 @@ Due log distinti in `_logs`:
   conteggio di file e dimensione nello storico e' calcolato in modo indipendente
   dalla lingua del sistema operativo.
 
+- `backup_AAAAMMGG_HHMMSS_ripresa.log`: log della seconda passata, quando c'e'
+  stata. Porta la stessa data e ora del log della prima, cosi' i due restano
+  accanto, e segue la stessa retention.
+
 - `BACKUP-FALLITO-RILANCIARE.txt`: rapporto dell'ultima copia con errori, con i
-  file non copiati e i comandi per rilanciare (sezione 9). Esiste solo finche'
-  un backup non riesce.
+  file non copiati e i comandi per rilanciare (sezione 9). Se la seconda passata
+  e' stata tentata, il rapporto cita anche il suo log e il suo codice, e gli
+  errori elencati sono quelli rimasti dopo di essa. Esiste solo finche' un
+  backup non riesce.
 
 - `_pulizie-pendenti\`: memoria dei giorni o snapshot in eliminazione, con un
   file per operazione e soli percorsi relativi validati. Resta fino al recupero

@@ -250,6 +250,73 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
         }
     }
 
+    # --- Ripresa: seconda passata quando il log non spiega il guasto ----
+    # Il declassamento qui sopra sa decidere solo se il log porta righe di
+    # errore. Ma robocopy puo' contare un guasto nel riepilogo finale e non
+    # scriverne niente: il 2026-10-28 la copia e' uscita con codice 11, il
+    # riepilogo diceva 1 directory non riuscita su 20.945 e 0 file su 195.088,
+    # e di righe ERRORE non ce n'era nessuna. Senza niente da leggere lo
+    # snapshot e' stato dichiarato difettoso ed eliminato: 28,9 GB copiati bene
+    # buttati per una cartella di cui non si sapra' mai il nome, e il backup
+    # tornato indietro di un giorno.
+    #
+    # Invece di indovinare, si riprova. Una seconda passata con gli stessi
+    # argomenti (/E, mai /MIR: non cancella niente) ricammina l'albero e copia
+    # solo cio' che manca, quindi costa l'enumerazione e poco altro. Se torna
+    # pulita, lo snapshot e' completo per constatazione e non per deduzione:
+    # robocopy ha appena riguardato tutto e non ha trovato piu' niente da fare.
+    # Se fallisce di nuovo, il guasto e' reale e vale il comportamento di prima.
+    # Vale anche per i guasti transitori che una riga di errore ce l'hanno (il
+    # file tenuto aperto un istante dall'antivirus): /R:1 e' una rete a maglie
+    # larghe, una passata intera e' il tentativo serio.
+    $RetryLog    = $null
+    $RetryCode   = $null
+    $RetryBenign = @()
+    $Summary     = Get-RobocopySummary $LogFile
+    if ($code -ge 8 -and $Summary.Found) {
+        Write-Step ("Riepilogo robocopy: {0} directory non riuscite su {1}, {2} file non riusciti su {3}." -f `
+                    $Summary.DirsFailed, $Summary.DirsTotal, $Summary.FilesFailed, $Summary.FilesTotal)
+    }
+    if ($code -ge 8 -and -not ($code -band 16) -and $RetryCopyOnFailure) {
+        # Non si scrive su un volume che nel frattempo si e' degradato: la
+        # verifica di fine copia piu' sotto fallirebbe comunque, ma questa
+        # passata scriverebbe prima di arrivarci.
+        $volume = Test-BackupVolume
+        if (-not $volume.Ok) {
+            Write-Step "Ripresa non tentata: $($volume.Reason)"
+        } else {
+            $RetryLog = Join-Path $LogDir ("backup_" + $now.ToString('yyyyMMdd_HHmmss') + "_ripresa.log")
+            $RetryArgs = @($RoboArgs | ForEach-Object {
+                if ($_ -eq ('/LOG:' + $LogFile)) { '/LOG:' + $RetryLog } else { $_ }
+            })
+            Write-Step "Copia con errori: seconda passata sullo stesso snapshot, copia solo cio' che manca."
+            $t1 = Get-Date
+            robocopy @RetryArgs
+            $RetryCode = $LASTEXITCODE
+            Write-Step ("Ripresa terminata in {0:hh\:mm\:ss} (codice robocopy {1})." -f ((Get-Date) - $t1), $RetryCode)
+            if ($RetryCode -lt 8) {
+                $code = $code -band (-bnot 8)
+                Write-Step ("Ripresa pulita: non e' rimasto niente da copiare. Codice robocopy {0} declassato a {1}: lo snapshot e' completo." -f $RoboCode, $code)
+            } elseif (-not ($RetryCode -band 16)) {
+                # La ripresa ha fallito a sua volta, ma se tutto cio' che resta
+                # sono percorsi spariti dalla sorgente vale la stessa clemenza
+                # della prima passata.
+                $retryErrs = @(Get-RobocopyLogErrors $RetryLog)
+                if ($retryErrs.Count -gt 0) {
+                    $RetryBenign = @($retryErrs | Where-Object { Test-VanishedSourceError $_ })
+                    if ($RetryBenign.Count -eq $retryErrs.Count) {
+                        $code = $code -band (-bnot 8)
+                        Write-Step ("Ripresa: restano solo {0} percorsi spariti dalla sorgente. Codice robocopy {1} declassato a {2}: lo snapshot e' completo." -f `
+                                    $RetryBenign.Count, $RoboCode, $code)
+                        foreach ($b in $RetryBenign) { Write-Host ("    ignorato: " + $b.Path) }
+                    } else {
+                        $RetryBenign = @()
+                    }
+                }
+            }
+        }
+    }
+
     # robocopy puo' propagare alla destinazione gli attributi della radice sorgente
     # (molte radici di volume sono Nascosto+Sistema), rendendo lo snapshot invisibile
     # in Esplora risorse pur contenendo i dati. Riportiamo le cartelle dello snapshot
@@ -281,6 +348,20 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
         Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
             '{0} | EFFIMERI | {1} | codice robocopy {2} declassato a {3}: {4} percorsi spariti durante la copia e assenti anche in origine' -f `
             (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $rel, $RoboCode, $code, $BenignErrs.Count)
+    }
+    if ($null -ne $RetryCode) {
+        $esitoRipresa = if ($code -lt 8) {
+            if ($RetryBenign.Count -gt 0) {
+                'codice robocopy {0} declassato a {1}: restavano solo {2} percorsi spariti dalla sorgente' -f $RoboCode, $code, $RetryBenign.Count
+            } else {
+                'codice robocopy {0} declassato a {1}: niente piu'' da copiare' -f $RoboCode, $code
+            }
+        } else {
+            'codice robocopy {0} confermato: la seconda passata e'' fallita a sua volta (codice {1})' -f $RoboCode, $RetryCode
+        }
+        Add-Content -LiteralPath $HistoryFile -Encoding UTF8 -Value (
+            '{0} | RIPRESA | {1} | {2} -> vedi {3}' -f `
+            (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $rel, $esitoRipresa, (Split-Path $RetryLog -Leaf))
     }
 
     # --- Memoria dell'esito: marca lo snapshot incompleto ---------------
@@ -391,9 +472,13 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
         if ($code -band 8)  { $codeMeaning += '8 = alcuni file o cartelle non sono stati copiati nemmeno al nuovo tentativo (file in uso, permessi, I/O, spazio).' }
 
         # Errori dal log robocopy: stessa analisi usata per il declassamento, cosi'
-        # rapporto e decisione leggono il log nello stesso modo.
-        $errs = @(Get-RobocopyLogErrors $LogFile |
+        # rapporto e decisione leggono il log nello stesso modo. Se la seconda
+        # passata e' stata fatta si legge quella: i suoi errori sono quelli
+        # rimasti in piedi dopo un secondo tentativo, cioe' quelli veri.
+        $errLog = if ($RetryLog -and (Test-Path -LiteralPath $RetryLog -ErrorAction SilentlyContinue)) { $RetryLog } else { $LogFile }
+        $errs = @(Get-RobocopyLogErrors $errLog |
                   ForEach-Object { if ($_.Message) { $_.Text + "`r`n      " + $_.Message } else { $_.Text } })
+        $errSummary = Get-RobocopySummary $errLog
         $maxErr = 40
 
         $drv  = Get-PSDrive -Name $ExpectedDriveLetter -ErrorAction SilentlyContinue
@@ -416,10 +501,22 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
         if ($errs.Count) {
             $errLines = @($errs | Select-Object -First $maxErr | ForEach-Object { '  ' + $_ })
             if ($errs.Count -gt $maxErr) { $errLines += "  ... altri $($errs.Count - $maxErr): vedi il log robocopy." }
+        } elseif ($errSummary.Found) {
+            # Il caso del 2026-10-28: robocopy conta il guasto nel riepilogo e
+            # non lo descrive. Dirlo e' meglio che mandare a cercare un codice
+            # 16 che non c'era.
+            $errLines = @(
+                ('  Nessuna riga di errore nel log, ma il riepilogo di robocopy conta {0} directory' -f $errSummary.DirsFailed)
+                ('  e {0} file non riusciti, su {1} directory e {2} file esaminati.' -f `
+                    $errSummary.FilesFailed, $errSummary.DirsTotal, $errSummary.FilesTotal)
+                '  robocopy non dice QUALI: e'' il motivo della seconda passata, che qui non'
+                '  e'' bastata. Guarda le ultime righe del log e il registro eventi di sistema'
+                '  (dischi in retry, evento disk/153).'
+            )
         } else {
             $errLines = @(
-                '  Nessuna riga ERROR nel log: con codice 16 la copia potrebbe essersi fermata'
-                '  subito; controlla le ultime righe del log robocopy.'
+                '  Log senza righe di errore e senza riepilogo finale: con codice 16 la copia'
+                '  si e'' fermata subito; controlla le ultime righe del log robocopy.'
             )
         }
 
@@ -439,6 +536,12 @@ if (-not $locked) { Write-Host "Backup gia' in corso. Esco."; exit $EXIT_ALREADY
         $report += @(
             ('Spazio libero su ' + $ExpectedDriveLetter + ': ' + $free)
             ('Log robocopy:     ' + $LogFile)
+        )
+        if ($RetryLog) {
+            $report += ('Log della ripresa: ' + $RetryLog)
+            $report += ('                  seconda passata sullo stesso snapshot, codice robocopy ' + $RetryCode)
+        }
+        $report += @(
             ''
             '--- ESITO ------------------------------------------------------'
         )

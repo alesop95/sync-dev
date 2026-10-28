@@ -392,7 +392,9 @@ function Remove-TreeFast([string]$Path) {
         # 2026-10-26\11-30-06 e la retention e' caduta su Directory.Delete con un
         # laconico "La directory non e' vuota". Il residuo si verifica quindi a
         # ogni passata e la purga si ripete con attese crescenti: i blocchi di
-        # questo tipo durano secondi. $CleanupRetryDelays e' sovrascrivibile dai test.
+        # questo tipo durano secondi. Vale uguale per una cartella che resta in
+        # piedi perche' qualcuno la tiene aperta.
+        # $CleanupRetryDelays e' sovrascrivibile dai test.
         $delays = if ($null -ne $CleanupRetryDelays) { @($CleanupRetryDelays) } else { @(5, 15, 30) }
         $left = @()
         for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
@@ -404,13 +406,19 @@ function Remove-TreeFast([string]$Path) {
             robocopy.exe $empty $resolved /MIR /XJ /NJH /NJS /NP /NFL /NDL /R:1 /W:1 | Out-Null
             $cleanupCode = $LASTEXITCODE
             if ($cleanupCode -ge 8) { throw "Pulizia fallita (robocopy $cleanupCode): $resolved" }
-            $left = @(Get-ChildItem -LiteralPath $resolved -Recurse -File -Force -ErrorAction Stop)
+            # Si contano file E cartelle: un /MIR che non riesce a togliere una
+            # sola cartella lascia zero file e un albero non vuoto, e il
+            # Directory.Delete qui sotto non e' ricorsivo. Cercando i soli file
+            # quel residuo passava inosservato fino a li', dove ricompariva come
+            # un laconico "La directory non e' vuota" che non dice dove.
+            $left = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)
             if ($left.Count -eq 0) { break }
         }
         if ($left.Count -gt 0) {
             $names = @($left | Select-Object -First 5 | ForEach-Object { $_.FullName.Substring($resolved.Length + 1) })
-            throw ("Pulizia incompleta di {0}: {1} file non eliminati dopo {2} tentativi, probabilmente in uso da un altro processo (antivirus, indicizzatore, editor aperto sul disco di backup): {3}. " +
-                   "La cancellazione resta registrata e riprende al prossimo backup.") -f $resolved, $left.Count, ($delays.Count + 1), ($names -join ', ')
+            throw ("Pulizia incompleta di {0}: {1} element{2} non eliminat{2} dopo {3} tentativi, probabilmente in uso da un altro processo (antivirus, indicizzatore, editor aperto sul disco di backup): {4}. " +
+                   "La cancellazione resta registrata e riprende al prossimo backup.") -f `
+                   $resolved, $left.Count, $(if ($left.Count -eq 1) { 'o' } else { 'i' }), ($delays.Count + 1), ($names -join ', ')
         }
         # Non ricorre sui residui: se /MIR non ha svuotato tutto, fallisce.
         [IO.Directory]::Delete($resolved, $false)
@@ -474,6 +482,42 @@ function Get-RobocopyLogErrors {
                 [pscustomobject]@{ Number = $num; Path = $file; Text = $text; Message = $msg }
             }
         }
+}
+
+# Numeri della tabella di riepilogo che robocopy stampa in fondo al log: le
+# righe Directory e File, di cui interessa soprattutto la quinta colonna, "Non
+# riuscita". E' l'unica fonte che dice QUANTE cose sono fallite anche quando
+# robocopy non scrive nessuna riga di errore.
+#
+# 2026-10-28: la copia esce con codice 11, il riepilogo conta 1 directory non
+# riuscita su 20.945 e 0 file su 195.088, e nel log non c'e' una sola riga
+# ERRORE. Il declassamento, che guarda solo le righe di errore, non trova niente
+# da declassare; il rapporto di fallimento annuncia "errori distinti nel log: 0"
+# e consiglia di controllare il codice 16, che non era quello. Risultato: 28 GB
+# di copia buttati e nessun indizio su che cosa fosse andato storto.
+#
+# Si legge per posizione e non per etichetta: la tabella e' tradotta nella
+# lingua di Windows ('Directory'/'File' in italiano, 'Dirs'/'Files' in inglese),
+# ma le sei colonne di interi sono sempre le stesse e solo quelle due righe le
+# hanno tutte intere (la riga Byte porta le unita', la riga Durata gli orari).
+function Get-RobocopySummary {
+    param([string]$Path)
+    $summary = [pscustomobject]@{
+        Found = $false; DirsTotal = 0; DirsFailed = 0; FilesTotal = 0; FilesFailed = 0
+    }
+    if (-not (Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)) { return $summary }
+    $rows = @(Get-Content -LiteralPath $Path -Encoding Oem |
+              Select-String -Pattern '^\s*[^:]+:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$')
+    if ($rows.Count -lt 2) { return $summary }
+    # Le ultime due righe cosi' fatte sono, in quest'ordine, Directory e File.
+    $dirs  = $rows[$rows.Count - 2].Matches[0].Groups
+    $files = $rows[$rows.Count - 1].Matches[0].Groups
+    $summary.Found       = $true
+    $summary.DirsTotal   = [int]$dirs[1].Value
+    $summary.DirsFailed  = [int]$dirs[5].Value
+    $summary.FilesTotal  = [int]$files[1].Value
+    $summary.FilesFailed = [int]$files[5].Value
+    return $summary
 }
 
 # Un errore e' BENIGNO quando riguarda un elemento che non esiste piu' nemmeno in

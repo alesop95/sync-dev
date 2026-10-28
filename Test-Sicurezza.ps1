@@ -180,6 +180,28 @@ try {
     } finally { $handle.Close() }
     Remove-TreeFast $lockedSnapshot
     Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Blocco rilasciato: pulizia ripresa e verificata'
+
+    # Una cartella che resta in piedi senza nessun file dentro: /MIR esce con 2,
+    # il controllo che guardava i soli file non vedeva niente e il
+    # Directory.Delete non ricorsivo falliva con "La directory non e' vuota",
+    # senza dire quale cartella fosse.
+    $dirSnapshot = Join-Path $BackupRoot '2026-01-05\08-00-00'
+    New-Item -ItemType Directory -Path (Join-Path $dirSnapshot 'resta') | Out-Null
+    function robocopy.exe {
+        param([Parameter(ValueFromRemainingArguments=$true)][object[]]$RoboArgs)
+        # Svuota i file e lascia in piedi le cartelle, come robocopy quando non
+        # riesce a rimuoverne una: codice 2, cioe' successo.
+        @(Get-ChildItem -LiteralPath $RoboArgs[1] -Recurse -File -Force) | Remove-Item -Force
+        $global:LASTEXITCODE = 2
+    }
+    try {
+        $message = ''
+        try { Remove-TreeFast $dirSnapshot } catch { $message = $_.Exception.Message }
+        Assert-True ($message -like '*Pulizia incompleta*resta*') 'Cartella rimasta senza file: residuo nominato, non "La directory non e'' vuota"'
+        Assert-True (@(Get-PendingCleanup) -contains '2026-01-05\08-00-00') 'Cartella rimasta: residuo registrato per il recupero'
+    } finally { Remove-Item -LiteralPath 'Function:\robocopy.exe' }
+    Remove-TreeFast $dirSnapshot
+    Assert-True (@(Get-PendingCleanup).Count -eq 0) 'Cartella rimasta: pulizia ripresa e verificata'
     $CleanupRetryDelays = $null
 
     # ===== Guardia sullo spazio libero ==============================
@@ -288,6 +310,7 @@ $BackupRoot = Join-Path $PSScriptRoot 'backups'
 $ExpectedDriveLetter = [IO.Path]::GetPathRoot($BackupRoot).Substring(0, 1)
 $script:scenario = '__SCENARIO__'
 $script:copyCalled = $false
+$script:roboPass = 0
 function Test-BackupDevice { [pscustomobject]@{ Ok = $true; Status = 'OK'; Reason = '' } }
 function Get-BackupVolumeInfo {
     [CmdletBinding()] param([string]$Letter)
@@ -304,6 +327,25 @@ function robocopy {
     param([Parameter(ValueFromRemainingArguments=$true)][object[]]$RoboArgs)
     $script:copyCalled = $true
     if ($script:scenario -eq 'copy-failure') { $global:LASTEXITCODE = 8; return }
+    # 'silent-failure' riproduce il 2026-10-28: prima passata con codice 11 e
+    # una directory non riuscita nel riepilogo, zero righe di errore nel log;
+    # seconda passata pulita. Il tutto copiando regolarmente il file.
+    if ($script:scenario -eq 'silent-failure') {
+        $script:roboPass++
+        $log = @($RoboArgs | Where-Object { "$_".StartsWith('/LOG:') })[0].Substring(5)
+        Set-Content -LiteralPath $log -Encoding Oem -Value @(
+            '              Totale   Copiato  IgnorateNon corrispondentiNon riuscitaSupplementari'
+            ('Directory:        12        11         0         0         ' + $(if ($script:roboPass -eq 1) { '1' } else { '0' }) + '         0')
+            '     File:       100       100         0         0         0         1'
+            '     Byte:  1.0 m  1.0 m         0         0         0       300')
+        if ($script:roboPass -eq 1) {
+            Copy-Item -LiteralPath (Join-Path $RoboArgs[0] 'file.txt') -Destination $RoboArgs[1]
+            $global:LASTEXITCODE = 11
+        } else {
+            $global:LASTEXITCODE = 1
+        }
+        return
+    }
     Copy-Item -LiteralPath (Join-Path $RoboArgs[0] 'file.txt') -Destination $RoboArgs[1]
     $global:LASTEXITCODE = 1
 }
@@ -352,7 +394,23 @@ if ($script:scenario -eq 'stats-failure') {
     $fixture = New-EngineFixture 'copy-failure' $false
     Assert-True ((Invoke-EngineFixture $fixture 'copy-failure') -eq 8) 'Engine: fallimento robocopy conserva il codice 8'
     Assert-True (Test-Path -LiteralPath (Join-Path $fixture.Previous 'previous.txt')) 'Engine: fallimento della copia conserva l''ultimo backup completo'
-    Assert-True (Test-Path -LiteralPath (Join-Path $fixture.Backups '_logs\BACKUP-FALLITO-RILANCIARE.txt')) 'Engine: fallimento della copia genera il rapporto di rilancio'
+    $failReport = Join-Path $fixture.Backups '_logs\BACKUP-FALLITO-RILANCIARE.txt'
+    Assert-True (Test-Path -LiteralPath $failReport) 'Engine: fallimento della copia genera il rapporto di rilancio'
+    Assert-True ((Get-Content -LiteralPath $failReport -Raw) -like '*Log della ripresa*') 'Engine: il rapporto dice che la seconda passata e'' stata tentata'
+
+    # Il guasto che robocopy conta e non racconta (2026-10-28). Prima di avere
+    # la seconda passata, qui si buttava uno snapshot integro e il backup
+    # restava indietro di un giorno.
+    $fixture = New-EngineFixture 'silent-failure' $false
+    Assert-True ((Invoke-EngineFixture $fixture 'silent-failure') -eq 0) 'Engine: guasto senza righe di errore recuperato dalla seconda passata'
+    $today = Join-Path $fixture.Backups (Get-Date -Format 'yyyy-MM-dd')
+    Assert-True (Test-Path -LiteralPath $today) 'Engine: lo snapshot recuperato resta su disco'
+    Assert-True (@(Get-ChildItem -LiteralPath $fixture.Backups -Filter '_SNAPSHOT-INCOMPLETO.txt' -Recurse -Force).Count -eq 0) 'Engine: lo snapshot recuperato non resta marcato incompleto'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Backups '_logs\BACKUP-FALLITO-RILANCIARE.txt'))) 'Engine: nessun rapporto di fallimento dopo una ripresa riuscita'
+    $storico = Get-Content -LiteralPath (Join-Path $fixture.Backups '_logs\storico-snapshot.txt') -Raw
+    Assert-True ($storico -match '\|\s*OK\s*\|') 'Engine: lo snapshot recuperato e'' registrato come OK'
+    Assert-True ($storico -match '\|\s*RIPRESA\s*\|') 'Engine: la seconda passata lascia traccia nello storico'
+    Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $fixture.Backups '_logs') -Filter '*_ripresa.log').Count -eq 1) 'Engine: il log della seconda passata resta accanto al primo'
 
     $fixture = New-EngineFixture 'only-partial' $false
     Set-Content -LiteralPath (Join-Path $fixture.Previous '_SNAPSHOT-INCOMPLETO.txt') -Value 'copia parziale da conservare'
@@ -473,6 +531,33 @@ if ($script:scenario -eq 'stats-failure') {
     Assert-True (-not (Test-Declassabile $log)) 'Declassamento negato: percorso fuori dalla sorgente'
 
     Assert-True (@(Get-RobocopyLogErrors (Join-Path $logRoot 'inesistente.log')).Count -eq 0) 'Log: file di log assente non fa eccezione'
+
+    # --- Riepilogo finale di robocopy (2026-10-28) ----------------------
+    # Numeri veri della copia che si e' persa una directory senza scriverne
+    # niente nel log: finche' si guardavano le sole righe di errore, qui non
+    # risultava nessun guasto da spiegare.
+    $log = New-RoboLog 'riepilogo.log' @(
+        '              Totale   Copiato  IgnorateNon corrispondentiNon riuscitaSupplementari'
+        'Directory:     20945     20791       155         0         1         0'
+        '     File:    195088    195072        16         0         0         1'
+        '     Byte:  28.274 g  28.274 g    42.3 k         0         0       300'
+        '   Durata:  11:24:56   0:23:31                       0:00:00   0:00:52')
+    $sum = Get-RobocopySummary $log
+    Assert-True ($sum.Found -and $sum.DirsFailed -eq 1 -and $sum.FilesFailed -eq 0) 'Riepilogo: guasto contato anche senza nessuna riga di errore'
+    Assert-True ($sum.DirsTotal -eq 20945 -and $sum.FilesTotal -eq 195088) 'Riepilogo: totali letti dalla tabella'
+
+    $log = New-RoboLog 'riepilogo-en.log' @(
+        '               Total    Copied   Skipped  Mismatch    FAILED    Extras'
+        '    Dirs :        12        11         0         0         1         0'
+        '   Files :       100        98         0         0         2         0'
+        '   Bytes :     1.0 m     1.0 m         0         0         0         0'
+        '   Times :   0:00:11   0:00:01                       0:00:00   0:00:00')
+    $sum = Get-RobocopySummary $log
+    Assert-True ($sum.Found -and $sum.DirsFailed -eq 1 -and $sum.FilesFailed -eq 2) 'Riepilogo: letto per posizione, quindi anche su Windows in inglese'
+
+    $log = New-RoboLog 'senza-riepilogo.log' @('   Terminato: copia interrotta')
+    Assert-True (-not (Get-RobocopySummary $log).Found) 'Riepilogo: log senza tabella non inventa numeri'
+    Assert-True (-not (Get-RobocopySummary (Join-Path $logRoot 'inesistente.log')).Found) 'Riepilogo: log assente non fa eccezione'
 
     Write-Host "Verifiche superate: $passed"
 } finally {
