@@ -51,7 +51,15 @@ $ExcludeDirs = @(
     # copiando questa cartella: un file che nasce o cambia a copia in corso chiude il
     # backup con ERRORE 2, lo stesso incidente gia' visto con COMMIT-MSG*.txt. Gli
     # script restano inclusi nello snapshot, solo i log no. Aggiunto il 2026-10-16.
-    'E:\sync-dev\_logs'
+    'E:\sync-dev\_logs',
+    # Le due parti pesanti e rigenerabili della cache di harmony-book: 5,63 GB in circa
+    # 29.400 file. lettura-diretta sono pagine dei PDF rese in webp/png, doc-ingest testi
+    # estratti; i PDF d'origine (10-biblioteca\cassaforte-fonti) restano nello snapshot e
+    # gli script di tools\ le ricreano. Il resto di 99-cache resta incluso di proposito:
+    # lettura-locale\backup tiene copie datate di corpus.sqlite che non si rigenerano.
+    # Aggiunto il 2026-10-28: la guardia chiedeva 56,0 GB su 53,8 liberi su J:.
+    'E:\harmony-book\_notes\99-cache\lettura-diretta',
+    'E:\harmony-book\_notes\99-cache\doc-ingest'
     # '.git'   # NON escludere: verifica del 2026-10-16 su 41 repo di E:\ -> 'my-wedding-day'
     #          # ha 16 commit non pushati e 'serp.systems-full-early_mvp' non ha alcun
     #          # remoto, quindi la sua storia esiste solo qui. Escludere .git li
@@ -68,7 +76,12 @@ $ExcludeDirs = @(
 # copiando, e il file sparito chiudeva il backup con ERRORE 2. Il contenuto finisce
 # comunque nella history git. Il suffisso .txt tiene fuori gli hook git 'commit-msg'
 # (senza estensione), che vanno salvati. Aggiunto il 2026-10-05.
-$ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store','*.vbk','*.vib','*.vbm','COMMIT-MSG*.txt')
+# Delta zip di harmony-book del 2026-10-15: 5,94 GB che contengono le fonti appena
+# entrate in _notes\10-biblioteca\cassaforte-fonti, gia' copiate in originale. Percorso
+# ASSOLUTO: gli altri zip di 90-archivio\backup (1,2 GB) sono l'unica storia di _notes,
+# che non e' in git, e restano inclusi. Aggiunto il 2026-10-28.
+$ExcludeFiles = @('*.tmp','Thumbs.db','.DS_Store','*.vbk','*.vib','*.vbm','COMMIT-MSG*.txt',
+    'E:\harmony-book\_notes\90-archivio\backup\harmony-private-delta-20261015T135532Z.zip')
 
 # ===== Guardia sullo spazio libero ==================================
 # Il 2026-10-16 il disco e' arrivato a 0 byte liberi durante la copia. Il danno
