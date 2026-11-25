@@ -847,6 +847,14 @@ due espulsioni rifiutate perche' `dllhost.exe` (il COM Surrogate di Esplora)
 teneva aperto J:, poi il cavo staccato comunque, e il backup del giorno dopo
 fermo su `Full Repair Needed`.
 
+Quando la rimozione sicura viene rifiutata, lo strumento per capire chi tiene il
+disco sta nel progetto `windows-status`: `scripts\Espelli-Supporto.ps1`, voci
+`2i` (diagnosi) e `2j` (espulsione) di `Avvia.ps1`. Da utente vede i processi
+dell'utente, da amministratore anche i servizi, e segnala i colpevoli ricorrenti:
+il 25/11 era un job di Veeam Agent in corso, che salvava anche il volume di J:.
+Sullo stesso progetto il passo `SUPPORTI` della prima installazione assegna la
+lettera J: al disco di backup su un PC nuovo, al posto di `Imposta-LetteraJ.ps1`.
+
 Riferimenti Microsoft: [errori storage e corruzione](https://learn.microsoft.com/en-us/troubleshoot/windows-server/backup-and-storage/troubleshoot-data-corruption-and-disk-errors),
 [chkdsk](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/chkdsk).
 

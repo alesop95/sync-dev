@@ -122,6 +122,73 @@ function Get-BackupVolumeInfo {
     return @(Get-VolumeInfoFromProvider $Letter)
 }
 
+# ===== Rimozioni a sorpresa del disco di backup =====================
+
+# exFAT non ha journaling: se il disco viene staccato mentre il volume e'
+# montato, al ricollegamento Windows lo segna "Warning / Full Repair Needed" e
+# la guardia sul volume blocca il backup. Il blocco e' giusto, ma da solo non
+# dice PERCHE' il volume si e' sporcato.
+#
+# 2026-11-24 17:52: due "Rimozione sicura" del T7 rifiutate perche' dllhost.exe
+# (COM Surrogate di Esplora) teneva aperto J:, poi il cavo staccato comunque
+# (Kernel-PnP 1010, "rimosso a sorpresa"). Il backup del 25/11 alle 11:30 si e'
+# fermato su "Full Repair Needed". Da novembre era gia' successo altre cinque
+# volte, ma ogni volta la causa andava ricostruita a mano dal registro eventi.
+
+function Get-BackupDiskUsbIds {
+    # ID di istanza USB (il dispositivo padre) dei dischi presenti il cui nome
+    # PnP corrisponde a $ExpectedDiskModel. E' l'ID che compare nei dati
+    # dell'evento 1010. Non fallisce mai: e' diagnostica, non una guardia.
+    try {
+        $pattern = if ($ExpectedDiskModel) { $ExpectedDiskModel } else { '*' }
+        return @(Invoke-StorageQuery -Description 'dispositivi PnP del disco di backup' -ArgumentList $pattern -Query {
+            param($p)
+            Get-PnpDevice -Class DiskDrive -PresentOnly -ErrorAction Stop |
+                Where-Object { $_.FriendlyName -like $p } |
+                ForEach-Object {
+                    [string](Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_Parent -ErrorAction Stop).Data
+                } |
+                Where-Object { $_ -like 'USB\*' }
+        })
+    } catch { return @() }
+}
+
+function Get-BackupSurpriseRemovals {
+    # Istanti (dal piu' vecchio) in cui il disco di backup e' stato staccato
+    # senza rimozione sicura negli ultimi $SurpriseRemovalLookbackDays giorni.
+    # Legge solo il registro eventi e non fallisce mai. I test la sostituiscono.
+    $days = if ($SurpriseRemovalLookbackDays -gt 0) { [int]$SurpriseRemovalLookbackDays } else { 7 }
+    try {
+        $usbIds = @(Get-BackupDiskUsbIds)
+        if ($usbIds.Count -eq 0) { return @() }
+        $events = @(Get-WinEvent -ErrorAction Stop -MaxEvents 500 -FilterHashtable @{
+            LogName   = 'Microsoft-Windows-Kernel-PnP/Device Management'
+            Id        = 1010
+            StartTime = (Get-Date).AddDays(-$days)
+        })
+        # Properties[0] e' l'ID dell'istanza rimossa: dai dati, non dal testo
+        # tradotto. Il confronto e' esatto e senza distinzione di maiuscole.
+        return @($events |
+                 Where-Object { $usbIds -contains [string]$_.Properties[0].Value } |
+                 ForEach-Object { $_.TimeCreated } |
+                 Sort-Object)
+    } catch { return @() }
+}
+
+function Get-SurpriseRemovalHint {
+    # Frase da accodare al motivo del blocco per volume non sano; '' se nel
+    # periodo non risultano rimozioni a sorpresa del disco di backup.
+    $removals = @(Get-BackupSurpriseRemovals)
+    if ($removals.Count -eq 0) { return '' }
+    $days = if ($SurpriseRemovalLookbackDays -gt 0) { [int]$SurpriseRemovalLookbackDays } else { 7 }
+    $last = ([datetime]$removals[-1]).ToString('dd/MM/yyyy HH:mm')
+    return (" Probabile causa: negli ultimi $days giorni il disco di backup e' stato staccato senza rimozione sicura " +
+            "$($removals.Count) volte (eventi Kernel-PnP 1010), l'ultima il $last; un volume exFAT staccato mentre e' montato " +
+            "resta segnato come da riparare. Ripara con 'chkdsk ${ExpectedDriveLetter}: /f' da un prompt amministratore. " +
+            "D'ora in poi stacca il disco solo dopo la rimozione sicura: se Windows la rifiuta perche' il disco e' in uso, " +
+            "chiudi le finestre di Esplora aperte su ${ExpectedDriveLetter}: e riprova.")
+}
+
 # ===== Guardie sul volume ===========================================
 
 function Test-BackupVolume {
@@ -138,7 +205,8 @@ function Test-BackupVolume {
         if ($health -ne 'Healthy' -or $operations.Count -eq 0 -or
             @($operations | Where-Object { $_ -ne 'OK' }).Count -gt 0) {
             $result.Status = 'UNHEALTHY'
-            $result.Reason = "Volume ${ExpectedDriveLetter}: ($($volume.FileSystemType)) non sano: $health / $($operations -join ', '). Copia e pulizia bloccate. Controlla e ripara il volume prima di rilanciare."
+            $result.Reason = "Volume ${ExpectedDriveLetter}: ($($volume.FileSystemType)) non sano: $health / $($operations -join ', '). Copia e pulizia bloccate. Controlla e ripara il volume prima di rilanciare." +
+                             (Get-SurpriseRemovalHint)
             return $result
         }
         $result.Ok = $true

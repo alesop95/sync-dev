@@ -55,6 +55,27 @@ try {
     $volumeThrows = $false
     $mockVolumes = @([pscustomobject]@{ HealthStatus = 'Healthy'; OperationalStatus = @('OK'); FileSystemType = 'exFAT' })
 
+    # --- Rimozioni a sorpresa nel messaggio del volume da riparare (2026-11-25) ---
+    # Prima la funzione vera, che legge il registro reale: non deve mai fallire.
+    Assert-True (@(Get-BackupSurpriseRemovals) -isnot [System.Exception]) `
+        'Diagnostica delle rimozioni a sorpresa: non fallisce mai'
+    function Get-BackupSurpriseRemovals { $script:mockRemovals }
+    $mockRemovals = @([datetime]'2026-11-23 17:54:21', [datetime]'2026-11-24 17:52:58')
+    $mockVolumes[0].HealthStatus = 'Warning'
+    $mockVolumes[0].OperationalStatus = @('Full Repair Needed')
+    $dirty = Test-BackupVolume
+    Assert-True (-not $dirty.Ok -and $dirty.Status -eq 'UNHEALTHY') 'Volume da riparare con rimozioni a sorpresa: resta bloccato'
+    Assert-True ($dirty.Reason -match '2 volte' -and $dirty.Reason -match '24/11/2026 17:52' -and $dirty.Reason -match 'chkdsk') `
+        'Volume da riparare: il messaggio conta le rimozioni a sorpresa e cita l''ultima'
+    $mockRemovals = @()
+    Assert-True ((Test-BackupVolume).Reason -notmatch 'rimozione sicura') `
+        'Volume da riparare senza rimozioni a sorpresa: nessuna causa inventata'
+    $mockVolumes[0].HealthStatus = 'Healthy'
+    $mockVolumes[0].OperationalStatus = @('OK')
+    $mockRemovals = @([datetime]'2026-11-24 17:52:58')
+    Assert-True ((Test-BackupVolume).Reason -eq '') 'Volume sano: le rimozioni a sorpresa non aggiungono nulla'
+    $mockRemovals = @()
+
     # --- Tetto di tempo sulle interrogazioni dei dischi (2026-10-23) ---
     # Senza questo, un disco guasto qualunque della macchina ferma il backup
     # per sempre dentro una guardia, senza log ne' pop-up: e' successo davvero.
@@ -312,6 +333,7 @@ $script:scenario = '__SCENARIO__'
 $script:copyCalled = $false
 $script:roboPass = 0
 function Test-BackupDevice { [pscustomobject]@{ Ok = $true; Status = 'OK'; Reason = '' } }
+function Get-BackupSurpriseRemovals { @() }
 function Get-BackupVolumeInfo {
     [CmdletBinding()] param([string]$Letter)
     $bad = $script:scenario -eq 'unhealthy' -or ($script:scenario -eq 'degraded-after-copy' -and $script:copyCalled)
