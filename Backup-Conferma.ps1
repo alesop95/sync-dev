@@ -34,8 +34,9 @@ $code = $p.ExitCode
 
 switch ($code) {
     0 {
-        # 64=info; si chiude da solo dopo 10s
-        $wshell.Popup("Copia, verifica e pulizia completate correttamente.`nPuoi richiedere la rimozione sicura del disco da Windows.", 10, "Backup Sviluppo", 64 + 4096)
+        # 64=info; timeout 0 = resta aperto come gli alert: l'esito non deve
+        # sparire prima che lo si legga (richiesta del 2026-11-25).
+        $wshell.Popup("Copia, verifica e pulizia completate correttamente.`nPuoi richiedere la rimozione sicura del disco da Windows.", 0, "Backup Sviluppo", 64 + 4096)
     }
     101 {
         # disco con lettera attesa ma dispositivo sbagliato. 16=stop, timeout 0 = resta aperto
