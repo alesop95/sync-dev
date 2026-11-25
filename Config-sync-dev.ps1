@@ -15,6 +15,11 @@ $ExpectedDriveLetter = 'J'              # lettera che il disco DEVE avere
 $ExpectedDiskModel   = '*Samsung*T7*'   # confronto -like sul nome del disco (FriendlyName)
 $ExpectedDiskSerial  = ''               # serial reale in config.local.ps1 (non versionato); '' = non controllato
 
+# Giorni di registro eventi in cui cercare le rimozioni a sorpresa del disco di
+# backup (Kernel-PnP 1010) quando il volume risulta da riparare. Serve solo a
+# spiegare il blocco nel messaggio, non decide nulla.
+$SurpriseRemovalLookbackDays = 7
+
 # Radice degli snapshot sul disco di backup
 $BackupRoot = ($ExpectedDriveLetter + ':\backup-sviluppo')
 

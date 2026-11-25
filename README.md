@@ -835,6 +835,18 @@ backup: riprendera' i residui registrati. Attendere sempre la rimozione sicura
 autorizzata da Windows. Se gli errori ritornano, verificare cavo, porta,
 alimentazione e dispositivo, oltre alla procedura di espulsione.
 
+Dal 2026-11-25 il messaggio del blocco per volume da riparare (codice 104)
+riporta da solo la causa piu' frequente: conta le rimozioni a sorpresa del disco
+di backup (evento `Kernel-PnP/Device Management` 1010) negli ultimi
+`$SurpriseRemovalLookbackDays` giorni (predefinito 7), cita l'ultima e ricorda
+come ripararlo. Il disco si riconosce dal suo dispositivo USB padre, cercato tra
+i dischi presenti il cui nome corrisponde a `$ExpectedDiskModel`. Se non trova
+rimozioni, il messaggio resta quello di prima. E' solo diagnostica: non cambia
+la decisione di bloccare. Il caso che l'ha motivata e' quello del 24 novembre:
+due espulsioni rifiutate perche' `dllhost.exe` (il COM Surrogate di Esplora)
+teneva aperto J:, poi il cavo staccato comunque, e il backup del giorno dopo
+fermo su `Full Repair Needed`.
+
 Riferimenti Microsoft: [errori storage e corruzione](https://learn.microsoft.com/en-us/troubleshoot/windows-server/backup-and-storage/troubleshoot-data-corruption-and-disk-errors),
 [chkdsk](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/chkdsk).
 
